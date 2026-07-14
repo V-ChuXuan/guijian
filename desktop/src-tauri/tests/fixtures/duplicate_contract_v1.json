@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "scanner": {
+    "head_bytes": 14,
+    "chunk_bytes": 7
+  },
+  "files": [
+    {
+      "path": "exact/inbox/original.bin",
+      "content_utf8": "alpha-duplicate-content",
+      "mtime_ns": 1700000000000000000
+    },
+    {
+      "path": "exact/archive/copy.bin",
+      "content_utf8": "alpha-duplicate-content",
+      "mtime_ns": 1700000100000000000
+    },
+    {
+      "path": "change/keep.bin",
+      "content_utf8": "change-me-safely",
+      "mtime_ns": 1700000200000000000
+    },
+    {
+      "path": "change/remove.bin",
+      "content_utf8": "change-me-safely",
+      "mtime_ns": 1700000300000000000
+    },
+    {
+      "path": "hard/00-source.bin",
+      "content_utf8": "hard-link-contract",
+      "mtime_ns": 1700000400000000000
+    },
+    {
+      "path": "hard/20-real-copy.bin",
+      "content_utf8": "hard-link-contract",
+      "mtime_ns": 1700000500000000000
+    },
+    {
+      "path": "prefix/candidate-a.bin",
+      "content_utf8": "shared-prefix-A",
+      "mtime_ns": 1700000600000000000
+    },
+    {
+      "path": "prefix/candidate-b.bin",
+      "content_utf8": "shared-prefix-B",
+      "mtime_ns": 1700000700000000000
+    },
+    {
+      "path": "unique/only.txt",
+      "content_utf8": "unique-data",
+      "mtime_ns": 1700000800000000000
+    },
+    {
+      "path": "empty/a.bin",
+      "content_utf8": "",
+      "mtime_ns": 1700000900000000000
+    },
+    {
+      "path": "empty/b.bin",
+      "content_utf8": "",
+      "mtime_ns": 1700001000000000000
+    },
+    {
+      "path": "symlink/inside.bin",
+      "content_utf8": "inside-symlink-content",
+      "mtime_ns": 1700001100000000000
+    }
+  ],
+  "links": [
+    {
+      "kind": "hardlink",
+      "path": "hard/10-alias.bin",
+      "target": "hard/00-source.bin",
+      "required": false
+    },
+    {
+      "kind": "symlink",
+      "path": "symlink/outside-link.bin",
+      "external_path": "outside.bin",
+      "external_content_utf8": "inside-symlink-content",
+      "required": false
+    }
+  ],
+  "expected_groups": [
+    {
+      "id": "exact-primary",
+      "digest": "17f3c173e206683573d23def31a9d60f311724554152071e82a4435bade9af1a",
+      "size": 23,
+      "members": [
+        "exact/archive/copy.bin",
+        "exact/inbox/original.bin"
+      ],
+      "default_keeper": "exact/archive/copy.bin",
+      "reclaimable_bytes": 23
+    },
+    {
+      "id": "change-guard",
+      "digest": "7b74ec2baddb357733e49d17451cc8e3efc1933a1b147c7a1135f1248e1ed395",
+      "size": 16,
+      "members": [
+        "change/keep.bin",
+        "change/remove.bin"
+      ],
+      "default_keeper": "change/keep.bin",
+      "reclaimable_bytes": 16
+    },
+    {
+      "id": "hardlink-alias",
+      "digest": "0cd7e2b3e1891687c8bc4cbb03dc53796eede7dd0ef5cb6e1c5a267bf68aaaea",
+      "size": 18,
+      "members": [
+        "hard/00-source.bin",
+        "hard/10-alias.bin",
+        "hard/20-real-copy.bin"
+      ],
+      "default_keeper": "hard/10-alias.bin",
+      "reclaimable_bytes": 18
+    }
+  ],
+  "stage_expectations": {
+    "partial_excludes": [
+      "empty/a.bin",
+      "empty/b.bin",
+      "unique/only.txt"
+    ],
+    "full_includes": [
+      "prefix/candidate-a.bin",
+      "prefix/candidate-b.bin"
+    ],
+    "never_grouped": [
+      "empty/a.bin",
+      "empty/b.bin",
+      "prefix/candidate-a.bin",
+      "prefix/candidate-b.bin",
+      "symlink/outside-link.bin"
+    ]
+  },
+  "selection_case": {
+    "group_id": "exact-primary",
+    "attempt_cleanup": "exact/archive/copy.bin",
+    "expected_error": "last_copy"
+  },
+  "changed_cleanup_case": {
+    "group_id": "change-guard",
+    "cleanup_path": "change/remove.bin",
+    "replacement_content_utf8": "change-me-safeLy",
+    "restore_mtime": true,
+    "expected_status": "changed",
+    "expected_trash_calls": 0
+  }
+}
