@@ -2,9 +2,9 @@
   <img src="desktop/assets/app-icon.svg" width="88" height="88" alt="归简图标">
 </p>
 
-<h1 align="center">归简</h1>
+# 归简
 
-<p align="center">按内容识别完全重复的文件，确认后安全移入 Windows 回收站。</p>
+按内容识别完全重复的文件，确认后安全移入 Windows 回收站。
 
 <p align="center">
   <a href="https://github.com/V-ChuXuan/guijian/releases/latest">下载 Windows x64 安装包</a>
@@ -13,6 +13,15 @@
 归简是一款整理完全重复文件的 Windows 桌面工具。选择一个文件夹后，它会递归扫描其中的普通文件，把文件大小与完整 SHA-256 均一致的文件列为一组，并给出保留与回收建议。
 
 它不根据文件名猜测，也不把相似图片、相似视频或名称接近的文件归为重复项。
+
+## 快速开始
+
+1. 从 [Releases](https://github.com/V-ChuXuan/guijian/releases/latest) 下载并安装最新版本。
+2. 选择要检查的文件夹，等待扫描完成。
+3. 核对每组文件的保留与回收选择。
+4. 点击“检查清理内容”，确认后将选中的副本移入系统回收站。
+
+当前安装包未进行 Authenticode 代码签名，Windows 可能显示“未知发布者”。请从本项目 Releases 下载，并使用发布页附带的 `SHA256SUMS.txt` 核对文件。
 
 ## 判重方式
 
@@ -24,15 +33,6 @@
 
 前两级只为减少不必要的完整读取；最终分组以文件大小和完整哈希为准。
 
-## 使用
-
-1. 从 [Releases](https://github.com/V-ChuXuan/guijian/releases/latest) 下载并安装最新版本。
-2. 选择要检查的文件夹，等待扫描完成。
-3. 核对每组文件的保留与回收选择。
-4. 点击“检查清理内容”，确认后将选中的副本移入系统回收站。
-
-当前安装包未进行 Authenticode 代码签名，Windows 可能显示“未知发布者”。请从本项目 Releases 下载，并使用发布页附带的 `SHA256SUMS.txt` 核对文件。
-
 ## 清理保护
 
 - 每组默认保留完整路径最短的一份，其余副本标记为待回收；选择可以在执行前调整。
@@ -41,7 +41,7 @@
 - 文件进入 Windows 系统回收站，不会直接永久删除。
 - 扫描、哈希与清理均在本机完成，文件路径和内容不会上传。
 
-## 当前边界
+## 使用限制
 
 - 仅支持 Windows 10 和 Windows 11，需要 Microsoft Edge WebView2 Runtime。
 - 只处理文件大小和完整 SHA-256 都相同的非空普通文件，不识别相似内容。
