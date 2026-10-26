@@ -15,8 +15,8 @@
         "title": "归简",
         "width": 1120,
         "height": 720,
-        "minWidth": 900,
-        "minHeight": 620,
+        "minWidth": 560,
+        "minHeight": 480,
         "center": true,
         "resizable": true
       }

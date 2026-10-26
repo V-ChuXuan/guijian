@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
@@ -75,10 +75,11 @@ pub fn validate_selection(
     if selection.group_id != group.id {
         return Err(SelectionError::WrongGroup);
     }
+    let paths: HashSet<_> = group.files.iter().map(|file| file.path.as_path()).collect();
     if selection
         .cleanup_paths
         .iter()
-        .any(|path| !group.contains_path(path))
+        .any(|path| !paths.contains(path.as_path()))
     {
         return Err(SelectionError::UnknownPath);
     }

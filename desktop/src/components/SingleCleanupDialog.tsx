@@ -6,7 +6,9 @@ interface SingleCleanupDialogProps {
   fileName: string;
   relativePath: string;
   pending: boolean;
+  resultUnknown: boolean;
   issue: string | null;
+  warning?: string | null;
   onCancel(): void;
   onConfirm(): void;
 }
@@ -15,7 +17,9 @@ export function SingleCleanupDialog({
   fileName,
   relativePath,
   pending,
+  resultUnknown,
   issue,
+  warning,
   onCancel,
   onConfirm,
 }: SingleCleanupDialogProps) {
@@ -23,8 +27,8 @@ export function SingleCleanupDialog({
   const cancelRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    cancelRef.current?.focus({ preventScroll: true });
-  }, []);
+    if (!pending) cancelRef.current?.focus({ preventScroll: true });
+  }, [pending]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -72,6 +76,7 @@ export function SingleCleanupDialog({
     >
       <div
         aria-labelledby="single-cleanup-title"
+        aria-describedby={`${warning ? "single-cleanup-path single-cleanup-warning" : "single-cleanup-path"}${resultUnknown ? " single-cleanup-check" : ""}`}
         aria-modal="true"
         className="single-cleanup-dialog"
         ref={dialogRef}
@@ -81,19 +86,32 @@ export function SingleCleanupDialog({
           <span className="single-cleanup-dialog__icon">
             <Icon name="trash" size={17} />
           </span>
-          <h2 id="single-cleanup-title">仅回收此文件</h2>
+          <h2 id="single-cleanup-title">{resultUnknown ? "未能确认清理结果" : "仅回收此文件"}</h2>
         </header>
 
-        <div className="single-cleanup-dialog__file" title={relativePath}>
+        <div className="single-cleanup-dialog__file">
           <strong>{fileName}</strong>
-          <span>{relativePath}</span>
+          <span id="single-cleanup-path">{relativePath}</span>
         </div>
+
+        {warning ? (
+          <div className="single-cleanup-dialog__issue" id="single-cleanup-warning">
+            <Icon name="warning" size={16} />
+            <span>{warning}</span>
+          </div>
+        ) : null}
 
         {issue ? (
           <div className="single-cleanup-dialog__issue" role="alert">
             <Icon name="warning" size={16} />
             <span>{issue}</span>
           </div>
+        ) : null}
+
+        {resultUnknown ? (
+          <p className="navigation-confirmation-copy" id="single-cleanup-check">
+            请先检查文件状态，再决定后续操作。
+          </p>
         ) : null}
 
         <footer className="single-cleanup-dialog__actions">
@@ -104,17 +122,19 @@ export function SingleCleanupDialog({
             ref={cancelRef}
             type="button"
           >
-            取消
+            {resultUnknown ? "返回检查" : "取消"}
           </button>
-          <button
-            className="button button--primary button--cleanup"
-            disabled={pending}
-            onClick={onConfirm}
-            type="button"
-          >
-            <Icon name="trash" size={16} />
-            {pending ? "正在处理…" : "移至回收站"}
-          </button>
+          {!resultUnknown ? (
+            <button
+              className="button button--primary button--cleanup"
+              disabled={pending}
+              onClick={onConfirm}
+              type="button"
+            >
+              <Icon name="trash" size={16} />
+              {pending ? "正在处理…" : "移至回收站"}
+            </button>
+          ) : null}
         </footer>
       </div>
     </div>

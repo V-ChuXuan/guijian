@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use desktop_lib::cleanup::{CleanupService, TrashPort};
 use desktop_lib::domain::{CleanupStatus, DuplicateGroup, ProgressStage, ScanProgress};
-use desktop_lib::scanner::{CancellationToken, DuplicateScanner};
+use desktop_lib::scanner::{validated_root, CancellationToken, DuplicateScanner};
 use desktop_lib::selection::{recommended_selection, update_selection, SelectionError};
 use serde::Deserialize;
 
@@ -98,7 +98,7 @@ struct ContractDirectory {
     root: PathBuf,
     external_root: PathBuf,
     hardlink_supported: bool,
-    symlink_supported: bool,
+    isolation_link: Option<(PathBuf, &'static str)>,
 }
 
 impl ContractDirectory {
@@ -111,10 +111,12 @@ impl ContractDirectory {
             "guijian-contract-{name}-{}-{unique}",
             std::process::id()
         ));
-        let root = base.join("scan-root");
+        // Exercise a noncanonical TEMP alias without changing process-wide environment.
+        let root = base.join("fixture-parent").join("..").join("scan-root");
         let external_root = base.join("outside-root");
         fs::create_dir_all(&root).expect("create contract scan root");
         fs::create_dir_all(&external_root).expect("create contract external root");
+        let root = validated_root(&root).expect("normalize contract scan root");
 
         for entry in &manifest.files {
             let path = safe_join(&root, &entry.path);
@@ -126,7 +128,7 @@ impl ContractDirectory {
         }
 
         let mut hardlink_supported = false;
-        let mut symlink_supported = false;
+        let mut isolation_link = None;
         for entry in &manifest.links {
             let link = safe_join(&root, &entry.path);
             if let Some(parent) = link.parent() {
@@ -163,13 +165,15 @@ impl ContractDirectory {
                             .as_bytes(),
                     )
                     .expect("write external symlink target");
-                    create_file_symlink(&target, &link)
+                    create_isolation_link(&target, &link).map(|kind| {
+                        isolation_link = Some((link.clone(), kind));
+                    })
                 }
                 other => panic!("unknown contract link kind: {other}"),
             };
             match result {
                 Ok(()) if entry.kind == "hardlink" => hardlink_supported = true,
-                Ok(()) if entry.kind == "symlink" => symlink_supported = true,
+                Ok(()) if entry.kind == "symlink" => {}
                 Ok(()) => unreachable!(),
                 Err(error) if entry.required => {
                     panic!(
@@ -185,13 +189,24 @@ impl ContractDirectory {
             root,
             external_root,
             hardlink_supported,
-            symlink_supported,
+            isolation_link,
+        }
+    }
+
+    fn unlink_isolation_fixture(&mut self) {
+        if let Some((link, kind)) = self.isolation_link.take() {
+            if kind == "directory junction" {
+                fs::remove_dir(link).expect("remove only the synthetic junction, not its target");
+            } else {
+                fs::remove_file(link).expect("remove only the synthetic symlink, not its target");
+            }
         }
     }
 }
 
 impl Drop for ContractDirectory {
     fn drop(&mut self) {
+        self.unlink_isolation_fixture();
         let _ = fs::remove_dir_all(&self.base);
     }
 }
@@ -347,17 +362,41 @@ fn set_modified_ns(path: &Path, value: u64) {
 }
 
 #[cfg(windows)]
-fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_file(target, link)
+fn create_isolation_link(target: &Path, link: &Path) -> std::io::Result<&'static str> {
+    use std::os::windows::process::CommandExt;
+
+    if std::os::windows::fs::symlink_file(target, link).is_ok() {
+        return Ok("file symlink");
+    }
+    let output = std::process::Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(link.components().collect::<PathBuf>())
+        .arg(
+            target
+                .parent()
+                .expect("synthetic target has a parent")
+                .components()
+                .collect::<PathBuf>(),
+        )
+        .creation_flags(0x0800_0000)
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "neither file symlink nor directory junction could be created: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok("directory junction")
 }
 
 #[cfg(unix)]
-fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
+fn create_isolation_link(target: &Path, link: &Path) -> std::io::Result<&'static str> {
+    std::os::unix::fs::symlink(target, link)?;
+    Ok("file symlink")
 }
 
 #[cfg(not(any(windows, unix)))]
-fn create_file_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
+fn create_isolation_link(_target: &Path, _link: &Path) -> std::io::Result<&'static str> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "symlink fixture is unsupported",
@@ -374,7 +413,7 @@ fn rust_scan_matches_the_shared_canonical_fixture() {
         canonical_groups(&result.groups, &directory.root),
         expected_groups(&manifest, |kind| match kind {
             "hardlink" => directory.hardlink_supported,
-            "symlink" => directory.symlink_supported,
+            "symlink" => directory.isolation_link.is_some(),
             _ => false,
         })
     );
@@ -417,10 +456,10 @@ fn rust_scan_matches_the_shared_canonical_fixture() {
 fn hardlink_alias_is_selected_by_the_same_path_policy() {
     let manifest = load_manifest();
     let directory = ContractDirectory::materialize(&manifest, "hardlink");
-    if !directory.hardlink_supported {
-        eprintln!("hardlink contract capability unavailable; assertion skipped");
-        return;
-    }
+    assert!(
+        directory.hardlink_supported,
+        "hardlink safety fixture is required"
+    );
     let (result, _) = scan_contract(&manifest, &directory);
     let alias = safe_join(&directory.root, "hard/10-alias.bin");
     let source = safe_join(&directory.root, "hard/00-source.bin");
@@ -451,24 +490,49 @@ fn hardlink_alias_is_selected_by_the_same_path_policy() {
 }
 
 #[test]
-fn symlink_outside_root_is_visible_and_never_followed_when_supported() {
+fn reparse_link_outside_root_is_visible_and_never_followed() {
     let manifest = load_manifest();
-    let directory = ContractDirectory::materialize(&manifest, "symlink");
-    if !directory.symlink_supported {
-        eprintln!("symlink contract capability unavailable; assertion skipped");
-        return;
-    }
+    let mut directory = ContractDirectory::materialize(&manifest, "symlink");
+    let (link, kind) = directory
+        .isolation_link
+        .as_ref()
+        .expect("root isolation fixture is required");
+    eprintln!("root isolation assertion executes with a real {kind}");
     let (result, _) = scan_contract(&manifest, &directory);
-    let link = safe_join(&directory.root, "symlink/outside-link.bin");
 
-    assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-    assert!(result.issues.iter().any(|issue| issue.path == link));
+    let metadata = link.symlink_metadata().unwrap();
+    if *kind == "directory junction" {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+
+            assert_ne!(metadata.file_attributes() & 0x400, 0);
+        }
+    } else {
+        assert!(metadata.file_type().is_symlink());
+    }
+    assert!(result.issues.iter().any(|issue| issue.path == *link));
     assert!(!result
         .groups
         .iter()
         .flat_map(|group| group.files.iter())
-        .any(|file| file.path == link));
-    assert!(directory.external_root.join("outside.bin").exists());
+        .any(|file| file.path.starts_with(link)));
+    let outside = directory.external_root.join("outside.bin");
+    let external_content = &manifest
+        .links
+        .iter()
+        .find(|entry| entry.kind == "symlink")
+        .unwrap()
+        .external_content_utf8
+        .as_ref()
+        .unwrap();
+    assert_eq!(fs::read(&outside).unwrap(), external_content.as_bytes());
+    directory.unlink_isolation_fixture();
+    assert_eq!(
+        fs::read(&outside).unwrap(),
+        external_content.as_bytes(),
+        "unlinking the isolation fixture must not remove its target"
+    );
 }
 
 #[test]

@@ -1,4 +1,12 @@
 const units = ["B", "KB", "MB", "GB", "TB"] as const;
+const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -20,14 +28,7 @@ export function formatDate(value: string): string {
   if (Number.isNaN(date.getTime())) {
     return "时间未知";
   }
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(date);
+  return dateFormatter.format(date);
 }
 
 export function fileNameFromPath(path: string): string {

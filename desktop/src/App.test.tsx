@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 import type {
+  CleanupOutcome,
+  CleanupProgress,
   CleanupReport,
   DesktopApi,
   DuplicateGroup,
@@ -46,6 +48,8 @@ const scanResult: ScanSession = {
 };
 
 const cleanupReport: CleanupReport = {
+  cancelled: false,
+  remainingFiles: 0,
   reclaimableBytes: 48_200_000,
   movedCount: 1,
   skippedCount: 0,
@@ -71,6 +75,8 @@ function deferred<T>() {
 
 function createApi(overrides: Partial<DesktopApi> = {}) {
   let progressListener: ((progress: ScanProgress) => void) | undefined;
+  let cleanupProgressListener: ((progress: CleanupProgress) => void) | undefined;
+  let closeBlockedListener: (() => void) | undefined;
   const api: DesktopApi = {
     selectScanRoot: vi.fn().mockResolvedValue({
       path: "D:\\资料库",
@@ -78,6 +84,15 @@ function createApi(overrides: Partial<DesktopApi> = {}) {
     }),
     startScan: vi.fn().mockResolvedValue(scanResult),
     cancelScan: vi.fn().mockResolvedValue(true),
+    cancelCleanup: vi.fn().mockResolvedValue(true),
+    subscribeCloseBlocked: vi.fn(async (listener) => {
+      closeBlockedListener = listener;
+      return () => undefined;
+    }),
+    subscribeCleanupProgress: vi.fn(async (listener) => {
+      cleanupProgressListener = listener;
+      return () => undefined;
+    }),
     subscribeScanProgress: vi.fn(async (listener) => {
       progressListener = listener;
       return () => undefined;
@@ -88,9 +103,13 @@ function createApi(overrides: Partial<DesktopApi> = {}) {
         file.path === path ? { ...file, cleanup } : file,
       ),
     })),
-    prepareSingleCleanup: vi.fn().mockResolvedValue(scanResult),
+    keepGroup: vi.fn(async (groupId) => ({
+      ...scanResult.groups.find((group) => group.id === groupId)!,
+      reclaimableBytes: 0,
+      files: scanResult.groups[0].files.map((file) => ({ ...file, cleanup: false })),
+    })),
     restoreRecommendedSelections: vi.fn().mockResolvedValue(scanResult),
-    confirmCleanup: vi.fn().mockResolvedValue(cleanupReport),
+    confirmCleanup: vi.fn().mockResolvedValue({ report: cleanupReport, session: { ...scanResult, groups: [] } }),
     copyPath: vi.fn().mockResolvedValue(undefined),
     revealFile: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -98,13 +117,113 @@ function createApi(overrides: Partial<DesktopApi> = {}) {
 
   return {
     api,
+    emitCloseBlocked() {
+      closeBlockedListener?.();
+    },
     emitProgress(progress: ScanProgress) {
       progressListener?.(progress);
+    },
+    emitCleanupProgress(progress: CleanupProgress) {
+      cleanupProgressListener?.(progress);
     },
   };
 }
 
 describe("归简", () => {
+  it.each([false, true])("长路径审阅与单文件确认预告限制，保持原选择且交由后端复核，原回收选择：%s", async (cleanup) => {
+    const user = userEvent.setup();
+    const root = "D:\\资料库\\";
+    const path = `${root}${"a".repeat(260 - root.length - 11)}\\report.txt`;
+    expect(path.length).toBe(260);
+    const initial: ScanSession = { ...scanResult, groups: [{
+      ...scanResult.groups[0],
+      files: [
+        { ...scanResult.groups[0].files[0], name: "report.txt", path: `${root}report.txt`, cleanup: !cleanup },
+        { ...scanResult.groups[0].files[1], name: "report.txt", path, cleanup },
+      ],
+    }] };
+    const { api } = createApi({
+      startScan: vi.fn().mockResolvedValue(initial),
+      confirmCleanup: vi.fn().mockResolvedValue({
+        report: { ...cleanupReport, movedCount: 0, failedCount: 1, items: [{ path, status: "failed", message: "后端拒绝长路径" }] },
+        session: initial,
+      }),
+    });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    const checkboxes = await screen.findAllByRole("checkbox", { name: "移至回收站 report.txt" });
+    const target = screen.getAllByRole("button", { name: "仅回收此文件：report.txt" })[1];
+    const warning = "路径过长，当前版本无法回收；请缩短路径后重新扫描。";
+    expect(checkboxes[0]).not.toHaveAccessibleDescription(/当前版本无法回收/);
+    expect(checkboxes[1]).toHaveAccessibleDescription(expect.stringContaining(warning));
+    expect(target).toHaveAccessibleDescription(expect.stringContaining(warning));
+    expect(checkboxes[1].closest("article")).toHaveTextContent(warning);
+
+    await user.click(target);
+    let dialog = screen.getByRole("dialog", { name: "仅回收此文件" });
+    expect(within(dialog).getByText(warning)).toBeVisible();
+    expect(dialog).toHaveAccessibleDescription(expect.stringContaining(warning));
+    expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus();
+    expect(within(dialog).getByRole("button", { name: "移至回收站" })).toBeEnabled();
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(target).toHaveFocus());
+    expect(checkboxes[1]).toHaveProperty("checked", cleanup);
+
+    await user.click(target);
+    dialog = screen.getByRole("dialog", { name: "仅回收此文件" });
+    await user.click(within(dialog).getByRole("button", { name: "移至回收站" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("后端拒绝长路径");
+    expect(within(dialog).getByText(warning)).toBeVisible();
+    expect(api.confirmCleanup).toHaveBeenCalledExactlyOnceWith({ groupId: initial.groups[0].id, path });
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(checkboxes[1]).toHaveProperty("checked", cleanup);
+    expect(api.updateSelection).not.toHaveBeenCalled();
+    expect(api.startScan).toHaveBeenCalledOnce();
+  });
+
+  it("跨组页修改选择后返回仍保留，清理确认包含所有隐藏页的选择", async () => {
+    const user = userEvent.setup();
+    const initial: ScanSession = {
+      ...scanResult,
+      groups: Array.from({ length: 51 }, (_, groupIndex) => ({
+        ...scanResult.groups[0], id: `batch-${groupIndex}`,
+        files: scanResult.groups[0].files.map((file, fileIndex) => ({
+          ...file, name: `batch-${groupIndex}-${fileIndex}.txt`,
+          path: `D:\\资料库\\batch-${groupIndex}-${fileIndex}.txt`,
+        })),
+      })),
+    };
+    let currentGroups = initial.groups;
+    const { api } = createApi({
+      startScan: vi.fn().mockResolvedValue(initial),
+      updateSelection: vi.fn(async (groupId, path, cleanup) => {
+        const updated = currentGroups.find((group) => group.id === groupId)!;
+        const next = { ...updated, reclaimableBytes: cleanup ? updated.sizeBytes : 0,
+          files: updated.files.map((file) => file.path === path ? { ...file, cleanup } : file) };
+        currentGroups = currentGroups.map((group) => group.id === groupId ? next : group);
+        return next;
+      }),
+    });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("checkbox", { name: "移至回收站 batch-0-1.txt" }));
+    await user.click(screen.getByRole("button", { name: "重复组：最后一页" }));
+    await user.click(screen.getByRole("button", { name: /batch-50-0.txt/ }));
+    await user.click(screen.getByRole("checkbox", { name: "移至回收站 batch-50-1.txt" }));
+    await user.click(screen.getByRole("button", { name: "重复组：第一页" }));
+    expect(screen.getByRole("checkbox", { name: "移至回收站 batch-0-1.txt" })).not.toBeChecked();
+    expect(screen.getByText("49 个文件")).toBeVisible();
+    await user.type(screen.getByRole("searchbox"), "batch-50");
+    expect(screen.getByRole("checkbox", { name: "移至回收站 batch-50-1.txt" })).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "检查清理内容" }));
+    expect(screen.getByRole("heading", { name: "准备移动 49 个副本" })).toBeVisible();
+    expect(api.updateSelection).toHaveBeenCalledTimes(2);
+    expect(api.startScan).toHaveBeenCalledOnce();
+    expect(api.confirmCleanup).not.toHaveBeenCalled();
+  });
+
   it("从简洁的目录选择开始，并保留四阶段导航", async () => {
     const user = userEvent.setup();
     const { api } = createApi();
@@ -217,7 +336,7 @@ describe("归简", () => {
       currentPath: "D:\\资料库\\工作",
     });
     expect(await screen.findByText("2.40 GB")).toBeInTheDocument();
-    expect(screen.getByRole("progressbar", { name: "分析进度 50%" })).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "当前阶段进度 50%" })).toBeInTheDocument();
     expect(screen.queryByText("重复组")).not.toBeInTheDocument();
     expect(screen.queryByText("筛选候选")).not.toBeInTheDocument();
 
@@ -248,6 +367,7 @@ describe("归简", () => {
     await user.click(screen.getByRole("button", { name: "停止扫描" }));
 
     expect(api.cancelScan).toHaveBeenCalledOnce();
+    expect(screen.getByRole("heading", { name: "正在停止分析" })).toHaveFocus();
     expect(
       screen.queryByRole("button", { name: "重新分析" }),
     ).not.toBeInTheDocument();
@@ -257,8 +377,8 @@ describe("归简", () => {
     });
 
     expect(
-      await screen.findByRole("heading", { name: "正在分析空间" }),
-    ).toBeInTheDocument();
+      await screen.findByRole("heading", { name: "分析已停止" }),
+    ).toHaveFocus();
     expect(screen.getByText("分析已停止")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重新分析" }));
 
@@ -266,6 +386,72 @@ describe("归简", () => {
     expect(
       await screen.findByRole("heading", { name: "检查重复文件" }),
     ).toBeInTheDocument();
+  });
+
+  it("停止扫描请求失败仍等待原扫描，不开放重试或返回", async () => {
+    const user = userEvent.setup();
+    const scan = deferred<ScanSession>();
+    const { api } = createApi({
+      startScan: vi.fn().mockReturnValue(scan.promise),
+      cancelScan: vi.fn().mockRejectedValue(new Error("扫描停止请求暂不可用")),
+    });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(screen.getByRole("button", { name: "停止扫描" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("扫描停止请求暂不可用");
+    expect(screen.getByRole("heading", { name: "正在分析空间" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "停止扫描" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "重新分析" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "返回选择位置" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "1 选择位置" })).toBeDisabled();
+    await act(async () => { scan.resolve(scanResult); });
+    expect(await screen.findByRole("heading", { name: "检查重复文件" })).toBeInTheDocument();
+    expect(api.startScan).toHaveBeenCalledOnce();
+    expect(api.cancelScan).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("扫描进度订阅失败明确提示不可用，仍等待真实扫描结果", async () => {
+    const user = userEvent.setup();
+    const scan = deferred<ScanSession>();
+    const { api } = createApi({
+      startScan: vi.fn().mockReturnValue(scan.promise),
+      subscribeScanProgress: vi.fn().mockRejectedValue(new Error("事件订阅被拒绝")),
+    });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("扫描进度暂不可用：事件订阅被拒绝");
+    expect(screen.getByRole("heading", { name: "正在分析空间" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "停止扫描" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "重新分析" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await act(async () => { scan.resolve(scanResult); });
+    expect(await screen.findByRole("heading", { name: "检查重复文件" })).toBeInTheDocument();
+    expect(api.startScan).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("停止扫描未被接受时说明仍在等待，不开放重复扫描", async () => {
+    const user = userEvent.setup();
+    const scan = deferred<ScanSession>();
+    const { api } = createApi({
+      startScan: vi.fn().mockReturnValue(scan.promise),
+      cancelScan: vi.fn().mockResolvedValue(false),
+    });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(screen.getByRole("button", { name: "停止扫描" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("停止请求未被接受，扫描仍在进行");
+    expect(screen.queryByRole("button", { name: "重新分析" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "停止扫描" })).toBeEnabled();
+    await act(async () => { scan.resolve(scanResult); });
+    expect(await screen.findByRole("heading", { name: "检查重复文件" })).toBeInTheDocument();
+    expect(api.startScan).toHaveBeenCalledOnce();
   });
 
   it("以单列原地展开审阅重复组，并且只保留一个内容滚动区", async () => {
@@ -302,8 +488,7 @@ describe("归简", () => {
       "1 组",
     );
     expect(resultAnchor).not.toHaveTextContent("完全重复");
-    expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
-    expect(screen.queryByPlaceholderText(/筛选文件名|筛选.*路径/)).not.toBeInTheDocument();
+    expect(screen.getByRole("searchbox", { name: "搜索文件名或路径" })).toBeInTheDocument();
     expect(screen.queryByText("1 组内容相同的文件")).not.toBeInTheDocument();
     expect(screen.getByText("文件", { selector: ".review-list__head span" })).toBeInTheDocument();
     expect(screen.queryByText("重复文件组")).not.toBeInTheDocument();
@@ -553,7 +738,7 @@ describe("归简", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
-  it("可以一键恢复所有重复组的默认建议", async () => {
+  it("确认后恢复所有重复组的默认建议", async () => {
     const user = userEvent.setup();
     const changedResult: ScanSession = {
       ...scanResult,
@@ -577,6 +762,7 @@ describe("归简", () => {
     await user.click(screen.getByRole("button", { name: "开始分析" }));
     await screen.findByRole("heading", { name: "检查重复文件" });
     await user.click(screen.getByRole("button", { name: "恢复建议" }));
+    await user.click(screen.getByRole("button", { name: "确认恢复全部建议" }));
 
     expect(api.restoreRecommendedSelections).toHaveBeenCalledOnce();
     expect(
@@ -642,6 +828,27 @@ describe("归简", () => {
     expect(menu).not.toHaveAttribute("open");
   });
 
+  it.each(["在资源管理器中显示", "复制完整路径"])("键盘执行%s后回到当前文件的菜单触发器", async (action) => {
+    const user = userEvent.setup();
+    const { api } = createApi();
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await screen.findByRole("heading", { name: "检查重复文件" });
+
+    const trigger = screen.getByLabelText("更多操作 年度报告.pdf");
+    const menu = trigger.closest("details")!;
+    await user.click(trigger);
+    expect(menu).toHaveAttribute("open");
+    within(menu).getByRole("button", { name: action }).focus();
+    await user.keyboard("{Enter}");
+
+    expect(menu).not.toHaveAttribute("open");
+    expect(trigger).toHaveFocus();
+    expect(action === "复制完整路径" ? api.copyPath : api.revealFile)
+      .toHaveBeenCalledExactlyOnceWith("D:\\资料库\\工作\\年度报告.pdf");
+  });
+
   it("单文件回收按钮先打开确认弹窗，取消后恢复焦点且不触碰权威选择", async () => {
     const user = userEvent.setup();
     const { api } = createApi();
@@ -665,7 +872,6 @@ describe("归简", () => {
     const dialog = screen.getByRole("dialog", { name: "仅回收此文件" });
     expect(within(dialog).getByText("年度报告.pdf")).toBeInTheDocument();
     expect(within(dialog).getByText("工作\\年度报告.pdf")).toBeInTheDocument();
-    expect(api.prepareSingleCleanup).not.toHaveBeenCalled();
     expect(api.confirmCleanup).not.toHaveBeenCalled();
 
     const cancel = within(dialog).getByRole("button", { name: "取消" });
@@ -682,148 +888,157 @@ describe("归简", () => {
     expect(screen.queryByRole("dialog", { name: "仅回收此文件" })).not.toBeInTheDocument();
     expect(target).toHaveFocus();
     expect(selectedDuplicate).toBeChecked();
-    expect(api.prepareSingleCleanup).not.toHaveBeenCalled();
     expect(api.confirmCleanup).not.toHaveBeenCalled();
   });
 
-  it("确认单文件回收时串行准备、清理和重扫，并在执行期间禁止关闭与重复提交", async () => {
+  it("单文件回收使用同一入口与返回会话，不重扫且执行期间禁止关闭与重复提交", async () => {
     const user = userEvent.setup();
-    const preparePending = deferred<ScanSession>();
-    const cleanupPending = deferred<CleanupReport>();
-    const refreshedSession: ScanSession = { ...scanResult, groups: [] };
-    const { api } = createApi({
-      startScan: vi
-        .fn()
-        .mockResolvedValueOnce(scanResult)
-        .mockResolvedValueOnce(refreshedSession),
-      prepareSingleCleanup: vi.fn().mockReturnValue(preparePending.promise),
-      confirmCleanup: vi.fn().mockReturnValue(cleanupPending.promise),
-    });
+    const pending = deferred<CleanupOutcome>();
+    const { api } = createApi({ confirmCleanup: vi.fn().mockReturnValue(pending.promise) });
     render(<App api={api} />);
-
     await user.click(screen.getByRole("button", { name: "选择文件夹" }));
     await user.click(screen.getByRole("button", { name: "开始分析" }));
     await screen.findByRole("heading", { name: "检查重复文件" });
-    const target = screen.getByRole("button", {
-      name: "仅回收此文件：年度报告.pdf",
-    });
-
-    await user.click(target);
+    await user.click(screen.getByRole("button", { name: "仅回收此文件：年度报告.pdf" }));
     const dialog = screen.getByRole("dialog", { name: "仅回收此文件" });
     const confirm = within(dialog).getByRole("button", { name: "移至回收站" });
     const cancel = within(dialog).getByRole("button", { name: "取消" });
     await user.click(confirm);
-
-    expect(api.prepareSingleCleanup).toHaveBeenCalledOnce();
-    expect(api.prepareSingleCleanup).toHaveBeenCalledWith(
-      "group-report",
-      "D:\\资料库\\工作\\年度报告.pdf",
-    );
-    expect(api.confirmCleanup).not.toHaveBeenCalled();
+    expect(api.confirmCleanup).toHaveBeenCalledExactlyOnceWith({
+      groupId: "group-report", path: scanResult.groups[0].files[0].path,
+    });
     expect(confirm).toBeDisabled();
     expect(cancel).toBeDisabled();
     await user.click(confirm);
-    expect(api.prepareSingleCleanup).toHaveBeenCalledOnce();
     await user.keyboard("{Escape}");
-    expect(screen.getByRole("dialog", { name: "仅回收此文件" })).toBeInTheDocument();
-
+    expect(api.confirmCleanup).toHaveBeenCalledOnce();
+    expect(dialog).toBeInTheDocument();
     await act(async () => {
-      preparePending.resolve(scanResult);
+      pending.resolve({ report: cleanupReport, session: { ...scanResult, groups: [] } });
     });
-    await waitFor(() => expect(api.confirmCleanup).toHaveBeenCalledOnce());
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
     expect(api.startScan).toHaveBeenCalledOnce();
-
-    await act(async () => {
-      cleanupPending.resolve(cleanupReport);
-    });
-    await waitFor(() => expect(api.startScan).toHaveBeenCalledTimes(2));
-    expect(api.startScan).toHaveBeenLastCalledWith("D:\\资料库");
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "仅回收此文件" })).not.toBeInTheDocument(),
-    );
-    expect(screen.getByRole("heading", { name: "未发现重复文件" })).toBeInTheDocument();
-    expect(
-      vi.mocked(api.prepareSingleCleanup).mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      vi.mocked(api.confirmCleanup).mock.invocationCallOrder[0],
-    );
+    await waitFor(() => expect(screen.getByRole("heading", { name: "未发现重复文件" })).toHaveFocus());
   });
 
-  it("单文件计划失败时留在弹窗并显示精确错误，关闭后仍可继续审阅", async () => {
+  it.each([
+    new Error("返回通道中断"),
+    { code: "internal", message: "返回通道中断" },
+    "返回通道中断",
+    { code: "unexpected", message: "返回通道中断" },
+  ])("单文件异常保留未知结果和实际错误，禁止原地重试并恢复键盘焦点：%j", async (error) => {
     const user = userEvent.setup();
-    const { api } = createApi({
-      prepareSingleCleanup: vi.fn().mockRejectedValue({
-        code: "invalid_selection",
-        message: "文件已不在当前重复组中",
-      }),
-    });
+    const pending = deferred<CleanupOutcome>();
+    const { api } = createApi({ confirmCleanup: vi.fn().mockReturnValue(pending.promise) });
     render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    const target = await screen.findByRole("button", { name: "仅回收此文件：年度报告.pdf" });
+    await user.click(target);
+    await user.tab();
+    const confirm = screen.getByRole("button", { name: "移至回收站" });
+    expect(confirm).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(confirm).toBeDisabled();
+    await user.keyboard("{Enter}{Escape}");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(api.confirmCleanup).toHaveBeenCalledOnce();
+    await act(async () => pending.reject(error));
 
+    const dialog = await screen.findByRole("dialog", { name: "未能确认清理结果" });
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("返回通道中断");
+    expect(within(dialog).getByText(/请先检查文件状态/)).toBeVisible();
+    expect(within(dialog).queryByRole("button", { name: /移至回收站/ })).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/未开始|没有开始|自动重试/)).not.toBeInTheDocument();
+    const back = within(dialog).getByRole("button", { name: "返回检查" });
+    expect(back).toHaveFocus();
+    await user.tab();
+    expect(back).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(back).toHaveFocus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(target).toHaveFocus());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(api.confirmCleanup).toHaveBeenCalledOnce();
+    expect(api.startScan).toHaveBeenCalledOnce();
+    expect(screen.getByRole("checkbox", { name: "移至回收站 年度报告.pdf" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "移至回收站 年度报告 - 副本.pdf" })).toBeChecked();
+
+    for (const name of ["年度报告.pdf", "年度报告 - 副本.pdf"]) {
+      await user.click(screen.getByRole("button", { name: `仅回收此文件：${name}` }));
+      const reopened = screen.getByRole("dialog", { name: "仅回收此文件" });
+      expect(within(reopened).queryByRole("alert")).not.toBeInTheDocument();
+      expect(within(reopened).getByRole("button", { name: "移至回收站" })).toBeEnabled();
+      await user.keyboard("{Escape}");
+    }
+    expect(api.confirmCleanup).toHaveBeenCalledOnce();
+  });
+
+  it.each(["invalid_path", "busy", "unknown_group", "invalid_selection", "no_scan_result"])("单文件明确前置拒绝保留原错误和人工选择：%s", async (code) => {
+    const user = userEvent.setup();
+    const { api } = createApi({ confirmCleanup: vi.fn().mockRejectedValue({
+      code, message: "文件已不在当前重复组中",
+    }) });
+    render(<App api={api} />);
     await user.click(screen.getByRole("button", { name: "选择文件夹" }));
     await user.click(screen.getByRole("button", { name: "开始分析" }));
     await screen.findByRole("heading", { name: "检查重复文件" });
-    const target = screen.getByRole("button", {
-      name: "仅回收此文件：年度报告.pdf",
-    });
+    const target = screen.getByRole("button", { name: "仅回收此文件：年度报告.pdf" });
     await user.click(target);
     const dialog = screen.getByRole("dialog", { name: "仅回收此文件" });
     await user.click(within(dialog).getByRole("button", { name: "移至回收站" }));
-
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-      "文件已不在当前重复组中",
-    );
-    expect(screen.getByRole("heading", { name: "检查重复文件" })).toBeInTheDocument();
-    expect(api.confirmCleanup).not.toHaveBeenCalled();
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("文件已不在当前重复组中");
+    expect(within(dialog).queryByText("未能确认清理结果")).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "移至回收站" })).toBeEnabled();
     await user.click(within(dialog).getByRole("button", { name: "取消" }));
     expect(target).toHaveFocus();
+    expect(screen.getByRole("checkbox", { name: "移至回收站 年度报告.pdf" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "移至回收站 年度报告 - 副本.pdf" })).toBeChecked();
+    expect(api.startScan).toHaveBeenCalledOnce();
   });
 
-  it("单文件执行失败时保留弹窗和目标信息，不会误刷新结果", async () => {
+  it.each([false, true])("单文件处理后采用后端会话并保留其他组的人工选择，执行失败：%s", async (failed) => {
     const user = userEvent.setup();
-    const preparedSession: ScanSession = {
-      ...scanResult,
-      groups: scanResult.groups.map((group) => ({
-        ...group,
-        files: group.files.map((file) => ({
-          ...file,
-          cleanup: file.path === "D:\\资料库\\工作\\年度报告.pdf",
-        })),
+    const unrelated: DuplicateGroup = {
+      ...scanResult.groups[0], id: "unrelated", digest: "b".repeat(64), reclaimableBytes: 0,
+      files: scanResult.groups[0].files.map((file, index) => ({
+        ...file, path: `D:\\资料库\\保留\\${index}.txt`, name: `${index}.txt`, cleanup: false,
       })),
     };
+    const initial = { ...scanResult, groups: [...scanResult.groups, unrelated] };
+    const refreshed = {
+      ...initial, issues: [{ path: "D:\\资料库\\新问题", message: "文件已变化" }],
+      groups: failed ? initial.groups : [unrelated],
+    };
+    const report: CleanupReport = failed ? {
+      cancelled: false, remainingFiles: 0, reclaimableBytes: 0, movedCount: 0, skippedCount: 0, failedCount: 1,
+      items: [{ path: scanResult.groups[0].files[0].path, status: "failed", message: "系统回收站暂时不可用" }],
+    } : cleanupReport;
     const { api } = createApi({
-      prepareSingleCleanup: vi.fn().mockResolvedValue(preparedSession),
-      confirmCleanup: vi.fn().mockRejectedValue({
-        code: "trash_failed",
-        message: "系统回收站暂时不可用",
-      }),
+      startScan: vi.fn().mockResolvedValue(initial),
+      confirmCleanup: vi.fn().mockResolvedValue({ report, session: refreshed }),
     });
     render(<App api={api} />);
-
     await user.click(screen.getByRole("button", { name: "选择文件夹" }));
     await user.click(screen.getByRole("button", { name: "开始分析" }));
     await screen.findByRole("heading", { name: "检查重复文件" });
-    await user.click(
-      screen.getByRole("button", { name: "仅回收此文件：年度报告.pdf" }),
-    );
+    await user.click(screen.getByRole("button", { name: "仅回收此文件：年度报告.pdf" }));
     const dialog = screen.getByRole("dialog", { name: "仅回收此文件" });
     await user.click(within(dialog).getByRole("button", { name: "移至回收站" }));
-
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
-      "系统回收站暂时不可用",
-    );
-    expect(within(dialog).getByText("年度报告.pdf")).toBeInTheDocument();
+    if (failed) {
+      expect(await within(dialog).findByRole("alert")).toHaveTextContent("系统回收站暂时不可用");
+      expect(within(dialog).queryByText("未能确认清理结果")).not.toBeInTheDocument();
+      expect(within(dialog).getByRole("button", { name: "移至回收站" })).toBeEnabled();
+      await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    } else {
+      await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    }
     expect(api.startScan).toHaveBeenCalledOnce();
-    expect(screen.getByRole("heading", { name: "检查重复文件" })).toBeInTheDocument();
-
-    await user.click(within(dialog).getByRole("button", { name: "取消" }));
-    expect(
-      screen.getByRole("checkbox", { name: "移至回收站 年度报告.pdf" }),
-    ).toBeChecked();
-    expect(
-      screen.getByRole("checkbox", {
-        name: "移至回收站 年度报告 - 副本.pdf",
-      }),
-    ).not.toBeChecked();
+    expect(await screen.findByText("有 1 项未完成检查")).toBeInTheDocument();
+    const expand = screen.queryByRole("button", { name: "全部展开" });
+    if (expand) await user.click(expand);
+    expect(screen.getByRole("checkbox", { name: "移至回收站 0.txt" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "移至回收站 1.txt" })).not.toBeChecked();
   });
 
   it("经过独立确认页后执行清理并展示空间收据", async () => {
@@ -856,6 +1071,29 @@ describe("归简", () => {
     expect(api.startScan).toHaveBeenLastCalledWith("D:\\资料库");
   });
 
+  it.each([false, true])("展示未完成检查的详情，空结果：%s", async (empty) => {
+    const user = userEvent.setup();
+    const { api } = createApi({
+      startScan: vi.fn().mockResolvedValue({
+        ...scanResult,
+        groups: empty ? [] : scanResult.groups,
+        issues: [{ path: "D:\\资料库\\私人目录", message: "拒绝访问" }],
+      }),
+    });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+
+    const summary = await screen.findByText("有 1 项未完成检查");
+    await user.click(summary);
+    expect(screen.getByText("D:\\资料库\\私人目录")).toBeVisible();
+    expect(screen.getByText("拒绝访问")).toBeVisible();
+    if (empty) {
+      expect(screen.getByRole("heading", { name: "已检查范围内未发现重复文件" })).toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "未发现重复文件" })).not.toBeInTheDocument();
+    }
+  });
+
   it("把无重复项作为正常扫描结果展示", async () => {
     const user = userEvent.setup();
     const emptyResult: ScanSession = {
@@ -874,5 +1112,339 @@ describe("归简", () => {
       await screen.findByText("未发现重复文件"),
     ).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("整组保留只调用一次原子接口", async () => {
+    const user = userEvent.setup();
+    const { api } = createApi();
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "全部保留" }));
+    expect(api.keepGroup).toHaveBeenCalledExactlyOnceWith("group-report");
+    expect(api.updateSelection).not.toHaveBeenCalled();
+    expect(screen.getByText("0 个文件")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "仅看待清理" }));
+    expect(screen.queryByRole("button", { name: /年度报告.pdf.*全部保留/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/没有符合筛选的重复组/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "仅看待清理" }));
+    expect(screen.getByRole("button", { name: /年度报告.pdf.*全部保留/ })).toBeVisible();
+  });
+
+  it("同名文件的选择和操作带有各自的路径描述", async () => {
+    const user = userEvent.setup();
+    const { api } = createApi({ startScan: vi.fn().mockResolvedValue({ ...scanResult, groups: [{
+      ...scanResult.groups[0], files: scanResult.groups[0].files.map((file, index) => ({ ...file, path: `D:\\资料库\\目录${index}\\报告.pdf`, name: "报告.pdf" })),
+    }] }) });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    const checkboxes = await screen.findAllByRole("checkbox", { name: "移至回收站 报告.pdf" });
+    expect(checkboxes[0]).toHaveAccessibleDescription(/目录0\\报告.pdf/);
+    expect(checkboxes[1]).toHaveAccessibleDescription("目录1\\报告.pdf");
+    const trashButtons = screen.getAllByRole("button", { name: "仅回收此文件：报告.pdf" });
+    expect(trashButtons[0]).toHaveAccessibleDescription("目录0\\报告.pdf");
+    expect(trashButtons[1]).toHaveAccessibleDescription("目录1\\报告.pdf");
+    const menuButtons = screen.getAllByText("•••").map((element) => element.closest("summary"));
+    expect(menuButtons[0]).toHaveAccessibleDescription("目录0\\报告.pdf");
+    expect(menuButtons[1]).toHaveAccessibleDescription("目录1\\报告.pdf");
+  });
+
+  it("恢复全部建议先确认，取消保留人工决定", async () => {
+    const user = userEvent.setup();
+    const { api } = createApi();
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "恢复建议" }));
+    expect(api.restoreRecommendedSelections).not.toHaveBeenCalled();
+    expect(screen.getByText(/覆盖所有人工选择/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "取消恢复" }));
+    expect(api.restoreRecommendedSelections).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "恢复建议" })).toHaveFocus();
+    await user.click(screen.getByRole("button", { name: "恢复建议" }));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.getByRole("button", { name: "恢复建议" })).toHaveFocus());
+    expect(api.restoreRecommendedSelections).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "恢复建议" }));
+    await user.click(screen.getByRole("button", { name: "确认恢复全部建议" }));
+    expect(api.restoreRecommendedSelections).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.getByRole("button", { name: "恢复建议" })).toHaveFocus());
+  });
+
+  it("检索和待清理筛选只影响显示，确认仍包含全部选择", async () => {
+    const user = userEvent.setup();
+    const secondGroup: DuplicateGroup = {
+      ...scanResult.groups[0], id: "second", files: scanResult.groups[0].files.map((file, index) => ({
+        ...file, path: `D:\\资料库\\图片\\${index}.png`, name: `${index}.png`,
+      })),
+    };
+    const { api } = createApi({ startScan: vi.fn().mockResolvedValue({ ...scanResult, groups: [...scanResult.groups, secondGroup] }) });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    const search = await screen.findByRole("searchbox", { name: "搜索文件名或路径" });
+    await user.type(search, "图片");
+    expect(screen.queryByRole("button", { name: /年度报告.pdf.*回收/ })).not.toBeInTheDocument();
+    expect(screen.getByText("2 个文件")).toBeInTheDocument();
+    expect(screen.getByText(/清理包含所有已选文件/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "仅看待清理" }));
+    expect(api.updateSelection).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "检查清理内容" }));
+    expect(screen.getByRole("heading", { name: "准备移动 2 个副本" })).toBeInTheDocument();
+  });
+
+  it("部分失败默认展示未处理文件并返回原会话，不自动重扫或重试", async () => {
+    const user = userEvent.setup();
+    const failedPath = scanResult.groups[0].files[1].path;
+    const { api } = createApi({ confirmCleanup: vi.fn().mockResolvedValue({
+      report: { ...cleanupReport, failedCount: 1, items: [
+        { path: "D:\\资料库\\已处理副本.txt", status: "moved_to_trash", message: "已移入回收站" },
+        { path: failedPath, status: "failed", message: "文件正在使用中" },
+      ] },
+      session: scanResult,
+    }) });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "检查清理内容" }));
+    await user.click(screen.getByRole("button", { name: "确认移至回收站" }));
+    expect(await screen.findByRole("heading", { name: "部分文件未处理" })).toBeVisible();
+    expect(screen.getByText(failedPath)).toBeVisible();
+    expect(screen.getByText("文件正在使用中")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "复制完整路径" }));
+    expect(api.copyPath).toHaveBeenCalledWith(failedPath);
+    await user.click(screen.getByRole("button", { name: "在资源管理器中显示" }));
+    expect(api.revealFile).toHaveBeenCalledWith(failedPath);
+    vi.mocked(api.revealFile).mockRejectedValueOnce(new Error("文件已移动或不可访问"));
+    await user.click(screen.getByRole("button", { name: "在资源管理器中显示" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("文件已移动或不可访问");
+    await user.click(screen.getByRole("button", { name: "复制完整路径" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "检查未处理文件" }));
+    expect(await screen.findByRole("heading", { name: "检查重复文件" })).toHaveFocus();
+    expect(screen.getByRole("checkbox", { name: "移至回收站 年度报告 - 副本.pdf" })).toBeChecked();
+    expect(api.startScan).toHaveBeenCalledOnce();
+    expect(api.confirmCleanup).toHaveBeenCalledOnce();
+  });
+});
+
+describe("清理可控性与人工选择保护", () => {
+  it("已有处理进度后请求异常只说明结果未确认，保留错误且不自动重试", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<CleanupOutcome>();
+    const { api, emitCleanupProgress } = createApi({ confirmCleanup: vi.fn().mockReturnValue(pending.promise) });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "检查清理内容" }));
+    await user.click(screen.getByRole("button", { name: "确认移至回收站" }));
+    act(() => emitCleanupProgress({ completedFiles: 1, totalFiles: 2, currentPath: null, movedCount: 1, skippedCount: 0, failedCount: 0 }));
+    await act(async () => pending.reject(new Error("清理结果返回失败")));
+
+    expect(await screen.findByRole("heading", { name: "清理结果未确认" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "未能确认清理结果" })).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("清理结果返回失败");
+    expect(screen.getByText("请先检查文件状态，再决定是否继续清理。")).toBeVisible();
+    expect(screen.queryByText(/清理没有开始|清理未执行/)).not.toBeInTheDocument();
+    expect(api.confirmCleanup).toHaveBeenCalledOnce();
+  });
+
+  it("最终确认直接给出完整长路径的可访问描述", async () => {
+    const user = userEvent.setup();
+    const relativePath = `${"很长的目录\\".repeat(24)}同名报告.pdf`;
+    const { api } = createApi({ startScan: vi.fn().mockResolvedValue({ ...scanResult, groups: [{
+      ...scanResult.groups[0], files: [scanResult.groups[0].files[0], { ...scanResult.groups[0].files[1], path: `D:\\资料库\\${relativePath}` }],
+    }] }) });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "仅回收此文件：年度报告 - 副本.pdf" }));
+    const dialog = screen.getByRole("dialog", { name: "仅回收此文件" });
+    expect(dialog).toHaveAccessibleDescription(relativePath);
+    expect(within(dialog).getByText(relativePath)).not.toHaveAttribute("title");
+    expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus();
+  });
+
+  it("批量清理显示真实进度，请求停止后等待报告再返回剩余会话", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<CleanupOutcome>();
+    const { api, emitCleanupProgress } = createApi({ confirmCleanup: vi.fn().mockReturnValue(pending.promise) });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "检查清理内容" }));
+    await user.click(screen.getByRole("button", { name: "确认移至回收站" }));
+    act(() => emitCleanupProgress({ completedFiles: 1, totalFiles: 3, currentPath: "D:\\资料库\\当前视频.mp4", movedCount: 1, skippedCount: 0, failedCount: 0 }));
+    expect(screen.getByText("已处理 1 / 3 个文件")).toBeVisible();
+    expect(screen.getByText("D:\\资料库\\当前视频.mp4")).toBeVisible();
+    const stop = screen.getByRole("button", { name: "完成当前文件后停止" });
+    await user.click(stop);
+    expect(api.cancelCleanup).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "正在等待当前文件完成…" })).toBeDisabled();
+    expect(screen.queryByRole("heading", { name: "清理已停止" })).not.toBeInTheDocument();
+    await act(async () => pending.resolve({ report: { ...cleanupReport, cancelled: true, remainingFiles: 2 }, session: scanResult }));
+    expect(await screen.findByRole("heading", { name: "清理已停止" })).toBeVisible();
+    expect(screen.getByText("还有 2 个文件未开始处理。")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "检查未处理文件" }));
+    expect(await screen.findByRole("heading", { name: "检查重复文件" })).toHaveFocus();
+    expect(api.startScan).toHaveBeenCalledOnce();
+    expect(api.confirmCleanup).toHaveBeenCalledOnce();
+  });
+
+  it("关闭被拦截时提示先停止，清理状态保留并等待原报告", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<CleanupOutcome>();
+    const { api, emitCleanupProgress, emitCloseBlocked } = createApi({ confirmCleanup: vi.fn().mockReturnValue(pending.promise) });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "检查清理内容" }));
+    await user.click(screen.getByRole("button", { name: "确认移至回收站" }));
+    act(() => emitCleanupProgress({ completedFiles: 1, totalFiles: 3, currentPath: "D:\\资料库\\当前视频.mp4", movedCount: 1, skippedCount: 0, failedCount: 0 }));
+    act(() => emitCloseBlocked());
+    expect(screen.getByText("操作进行中，请先停止后再关闭窗口")).toBeVisible();
+    expect(screen.getByText("已处理 1 / 3 个文件")).toBeVisible();
+    expect(screen.getByText("D:\\资料库\\当前视频.mp4")).toBeVisible();
+    expect(screen.getByRole("button", { name: "完成当前文件后停止" })).toBeEnabled();
+    expect(screen.queryByRole("heading", { name: "清理完成" })).not.toBeInTheDocument();
+    expect(api.cancelCleanup).not.toHaveBeenCalled();
+    expect(api.startScan).toHaveBeenCalledOnce();
+    expect(api.confirmCleanup).toHaveBeenCalledOnce();
+    await act(async () => pending.resolve({ report: cleanupReport, session: { ...scanResult, groups: [] } }));
+    expect(await screen.findByRole("heading", { name: "清理完成" })).toBeVisible();
+    expect(screen.getByText("已移入回收站 1 个")).toBeVisible();
+  });
+
+  it("关闭提示订阅失败会显示原因而不产生未处理拒绝", async () => {
+    const { api } = createApi({ subscribeCloseBlocked: vi.fn().mockRejectedValue(new Error("订阅被拒绝")) });
+    render(<App api={api} />);
+    expect(await screen.findByText("关闭提示暂不可用：订阅被拒绝")).toBeVisible();
+    expect(screen.getByRole("button", { name: "选择文件夹" })).toBeEnabled();
+  });
+
+  it("停止请求失败只显示原因，清理仍等待原报告", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<CleanupOutcome>();
+    const { api } = createApi({ confirmCleanup: vi.fn().mockReturnValue(pending.promise), cancelCleanup: vi.fn().mockRejectedValue(new Error("停止请求未送达")) });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "检查清理内容" }));
+    await user.click(screen.getByRole("button", { name: "确认移至回收站" }));
+    await user.click(screen.getByRole("button", { name: "完成当前文件后停止" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("停止请求未送达");
+    expect(screen.queryByRole("button", { name: "确认移至回收站" })).not.toBeInTheDocument();
+    await act(async () => pending.resolve({ report: cleanupReport, session: { ...scanResult, groups: [] } }));
+    expect(await screen.findByRole("heading", { name: "清理完成" })).toBeVisible();
+  });
+
+  it("进度订阅失败会在清理时说明，仍可等待真实报告", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<CleanupOutcome>();
+    const { api } = createApi({ subscribeCleanupProgress: vi.fn().mockRejectedValue(new Error("订阅失败")), confirmCleanup: vi.fn().mockReturnValue(pending.promise) });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "检查清理内容" }));
+    await user.click(screen.getByRole("button", { name: "确认移至回收站" }));
+    expect(screen.getByText(/清理进度暂不可用/)).toBeVisible();
+    await act(async () => pending.resolve({ report: cleanupReport, session: { ...scanResult, groups: [] } }));
+  });
+
+  it.each(["重新扫描", "更换文件夹"])("人工修改后%s先确认，取消不丢选择", async (action) => {
+    const user = userEvent.setup();
+    const { api } = createApi();
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "全部保留" }));
+    const trigger = screen.getByRole("button", { name: action });
+    await user.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "保留当前人工选择？" });
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(trigger).toHaveFocus();
+    expect(screen.getByText("0 个文件")).toBeVisible();
+    expect(api.startScan).toHaveBeenCalledOnce();
+    await user.click(trigger);
+    await user.click(screen.getByRole("button", { name: action === "重新扫描" ? "继续重新扫描" : "继续更换文件夹" }));
+    if (action === "重新扫描") {
+      await waitFor(() => expect(api.startScan).toHaveBeenCalledTimes(2));
+    } else {
+      expect(screen.getByRole("heading", { name: "选择文件夹" })).toBeVisible();
+    }
+  });
+
+  it("改回扫描时的原选择后不再提示离开", async () => {
+    const user = userEvent.setup();
+    const { api } = createApi();
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    const checkbox = await screen.findByRole("checkbox", { name: "移至回收站 年度报告 - 副本.pdf" });
+    await user.click(checkbox);
+    await user.click(checkbox);
+    await user.click(screen.getByRole("button", { name: "重新扫描" }));
+    await waitFor(() => expect(api.startScan).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("dialog", { name: "保留当前人工选择？" })).not.toBeInTheDocument();
+  });
+
+  it("恢复全部建议后清除人工差异，离开无需再次确认", async () => {
+    const user = userEvent.setup();
+    const { api } = createApi();
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "全部保留" }));
+    await user.click(screen.getByRole("button", { name: "恢复建议" }));
+    await user.click(screen.getByRole("button", { name: "确认恢复全部建议" }));
+    await user.click(screen.getByRole("button", { name: "更换文件夹" }));
+    expect(screen.getByRole("heading", { name: "选择文件夹" })).toBeVisible();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("单文件成功对账后的自动保留副本不冒充人工修改", async () => {
+    const user = userEvent.setup();
+    const third = { ...scanResult.groups[0].files[1], path: "D:\\资料库\\存档\\第三份.pdf", name: "第三份.pdf" };
+    const initial = { ...scanResult, groups: [{ ...scanResult.groups[0], files: [...scanResult.groups[0].files, third] }] };
+    const refreshed = { ...scanResult, groups: [{ ...scanResult.groups[0], files: [
+      { ...scanResult.groups[0].files[1], cleanup: false, recommendedKeeper: true }, third,
+    ] }] };
+    const { api } = createApi({
+      startScan: vi.fn().mockResolvedValue(initial),
+      confirmCleanup: vi.fn().mockResolvedValue({ report: cleanupReport, session: refreshed }),
+    });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "仅回收此文件：年度报告.pdf" }));
+    await user.click(within(screen.getByRole("dialog", { name: "仅回收此文件" })).getByRole("button", { name: "移至回收站" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "重新扫描" }));
+    await waitFor(() => expect(api.startScan).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("dialog", { name: "保留当前人工选择？" })).not.toBeInTheDocument();
+  });
+
+  it("单文件回收后其他组的人工选择仍受离开确认保护", async () => {
+    const user = userEvent.setup();
+    const otherGroup: DuplicateGroup = { ...scanResult.groups[0], id: "other", files: scanResult.groups[0].files.map((file, index) => ({ ...file, path: `D:\\资料库\\其他\\${index}.bin`, name: `其他${index}.bin` })) };
+    const manualGroup = { ...scanResult.groups[0], reclaimableBytes: 0, files: scanResult.groups[0].files.map((file) => ({ ...file, cleanup: false })) };
+    const { api } = createApi({
+      startScan: vi.fn().mockResolvedValue({ ...scanResult, groups: [...scanResult.groups, otherGroup] }),
+      confirmCleanup: vi.fn().mockResolvedValue({ report: cleanupReport, session: { ...scanResult, groups: [manualGroup] } }),
+    });
+    render(<App api={api} />);
+    await user.click(screen.getByRole("button", { name: "选择文件夹" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
+    await user.click(await screen.findByRole("button", { name: "全部保留" }));
+    await user.click(screen.getByRole("button", { name: "全部展开" }));
+    await user.click(screen.getByRole("button", { name: "仅回收此文件：其他0.bin" }));
+    await user.click(within(screen.getByRole("dialog", { name: "仅回收此文件" })).getByRole("button", { name: "移至回收站" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "重新扫描" }));
+    const dialog = screen.getByRole("dialog", { name: "保留当前人工选择？" });
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(screen.getByRole("checkbox", { name: "移至回收站 年度报告 - 副本.pdf" })).not.toBeChecked();
+    expect(api.startScan).toHaveBeenCalledOnce();
   });
 });

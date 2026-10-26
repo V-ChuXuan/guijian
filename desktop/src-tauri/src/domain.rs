@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -97,11 +97,9 @@ impl DuplicateGroup {
         {
             return Err("重复组文件摘要或大小不一致".to_owned());
         }
-        for (index, file) in files.iter().enumerate() {
-            if files[..index]
-                .iter()
-                .any(|previous| previous.path == file.path)
-            {
+        let mut paths = HashSet::with_capacity(files.len());
+        for file in &files {
+            if !paths.insert(&file.path) {
                 return Err("重复组不能包含相同路径".to_owned());
             }
         }
@@ -241,6 +239,19 @@ pub struct CleanupItemResult {
 pub struct CleanupReport {
     pub items: Vec<CleanupItemResult>,
     pub reclaimable_bytes: u64,
+    pub cancelled: bool,
+    pub remaining_files: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupProgress {
+    pub completed_files: usize,
+    pub total_files: usize,
+    pub current_path: Option<PathBuf>,
+    pub moved_count: usize,
+    pub skipped_count: usize,
+    pub failed_count: usize,
 }
 
 impl CleanupReport {
@@ -405,5 +416,11 @@ mod tests {
         assert_eq!(first.recommended_keeper().path, expected);
         assert_eq!(second.recommended_keeper().path, expected);
         assert_eq!(first.files, second.files);
+    }
+
+    #[test]
+    fn duplicate_paths_are_rejected_before_group_creation() {
+        let file = snapshot(r"C:\Root\same.txt");
+        assert!(DuplicateGroup::from_files(vec![file.clone(), file]).is_err());
     }
 }

@@ -1,13 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import type { DuplicateGroup } from "../../api/desktopApi";
-import {
-  fileNameFromPath,
-  formatBytes,
-  formatDate,
-  formatRelativePath,
-} from "../../lib/format";
+import type { DuplicateGroup, ScanIssue } from "../../api/desktopApi";
+import { formatBytes } from "../../lib/format";
 import { Icon } from "../Icon";
+import { ReviewGroup } from "./ReviewGroup";
+import { REVIEW_PAGE_SIZE, ReviewPagination } from "./ReviewPagination";
+import { ScanIssues } from "./ScanIssues";
 
 interface ReviewStageProps {
   root: string;
@@ -17,6 +15,7 @@ interface ReviewStageProps {
   expandedGroupIds: ReadonlySet<string>;
   selectionPending: boolean;
   issue: string | null;
+  issues: ScanIssue[];
   onToggleGroup(groupId: string): void;
   onToggleAllGroups(expand: boolean): void;
   onDecision(groupId: string, path: string, cleanup: boolean): void;
@@ -24,11 +23,7 @@ interface ReviewStageProps {
   onRevealFile(path: string): void;
   onRequestSingleCleanup(groupId: string, path: string): void;
   onKeepAll(groupId: string): void;
-  onRestoreAll(): void;
-}
-
-function cleanupCount(group: DuplicateGroup): number {
-  return group.files.filter((file) => file.cleanup).length;
+  onRestoreAll(): void | Promise<void>;
 }
 
 export function ReviewStage({
@@ -39,6 +34,7 @@ export function ReviewStage({
   expandedGroupIds,
   selectionPending,
   issue,
+  issues,
   onToggleGroup,
   onToggleAllGroups,
   onDecision,
@@ -49,6 +45,42 @@ export function ReviewStage({
   onRestoreAll,
 }: ReviewStageProps) {
   const stageRef = useRef<HTMLElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const focusedNode = useRef<HTMLElement | null>(null);
+  const focusAfterPage = useRef(false);
+  const [groupPage, setGroupPage] = useState(0);
+  const [query, setQuery] = useState("");
+  const [pendingOnly, setPendingOnly] = useState(false);
+  const [confirmRestore, setConfirmRestore] = useState(false);
+  const restoreButtonRef = useRef<HTMLButtonElement>(null);
+  const cancelRestoreRef = useRef<HTMLButtonElement>(null);
+  const search = query.trim().toLocaleLowerCase();
+  const visibleGroups = groups.filter((group) =>
+    (!pendingOnly || group.files.some((file) => file.cleanup)) &&
+    (!search || group.files.some((file) => `${file.name}\n${file.path}`.toLocaleLowerCase().includes(search))),
+  );
+
+  const page = Math.max(0, Math.min(groupPage, Math.ceil(visibleGroups.length / REVIEW_PAGE_SIZE) - 1));
+
+  useLayoutEffect(() => {
+    if (groupPage !== page) setGroupPage(page);
+    if (focusAfterPage.current || (focusedNode.current && !focusedNode.current.isConnected && document.activeElement === document.body)) {
+      focusAfterPage.current = false;
+      if (listRef.current) listRef.current.scrollTop = 0;
+      (listRef.current?.querySelector<HTMLElement>(".review-group__head") ?? listRef.current)?.focus();
+    }
+  });
+
+  useEffect(() => {
+    if (confirmRestore) {
+      cancelRestoreRef.current?.focus();
+    }
+  }, [confirmRestore]);
+
+  const closeRestoreConfirmation = () => {
+    setConfirmRestore(false);
+    window.setTimeout(() => restoreButtonRef.current?.focus(), 0);
+  };
 
   useEffect(() => {
     const closeMenusOutside = (event: PointerEvent) => {
@@ -87,10 +119,6 @@ export function ReviewStage({
     };
   }, []);
 
-  const closeMenu = (target: HTMLElement) => {
-    target.closest<HTMLDetailsElement>(".review-row-menu")?.removeAttribute("open");
-  };
-
   const allGroupsExpanded = groups.every((group) =>
     expandedGroupIds.has(group.id),
   );
@@ -101,14 +129,17 @@ export function ReviewStage({
         className="center-state clean-empty stage-enter"
         aria-labelledby="page-title"
       >
-        <span className="center-state__icon center-state__icon--success">
-          <Icon name="spark" size={31} />
+        <span className={`center-state__icon ${issues.length ? "" : "center-state__icon--success"}`}>
+          <Icon name={issues.length ? "warning" : "spark"} size={31} />
         </span>
-        <h1 id="page-title" tabIndex={-1}>未发现重复文件</h1>
+        <h1 id="page-title" tabIndex={-1}>
+          {issues.length ? "已检查范围内未发现重复文件" : "未发现重复文件"}
+        </h1>
         <p>
           已检查 {scannedFiles.toLocaleString("zh-CN")} 个文件，共{" "}
           {formatBytes(scannedBytes)}。
         </p>
+        <ScanIssues issues={issues} />
       </section>
     );
   }
@@ -118,6 +149,7 @@ export function ReviewStage({
       aria-labelledby="page-title"
       className="review-stage stage-enter"
       ref={stageRef}
+      onFocusCapture={(event) => { focusedNode.current = event.target; }}
     >
       <h1 className="visually-hidden" id="page-title" tabIndex={-1}>
         检查重复文件
@@ -143,13 +175,72 @@ export function ReviewStage({
           <button
             className="text-button"
             disabled={selectionPending}
-            onClick={onRestoreAll}
+            onClick={() => setConfirmRestore(true)}
+            ref={restoreButtonRef}
             type="button"
           >
             恢复建议
           </button>
         </div>
       </div>
+
+      <div className="review-filters">
+        <input
+          aria-label="搜索文件名或路径"
+          onChange={(event) => { setQuery(event.currentTarget.value); setGroupPage(0); }}
+          placeholder="搜索文件名或路径"
+          type="search"
+          value={query}
+        />
+        <button
+          aria-pressed={pendingOnly}
+          className="text-button"
+          onClick={() => { setPendingOnly((current) => !current); setGroupPage(0); }}
+          type="button"
+        >
+          仅看待清理
+        </button>
+        {search || pendingOnly ? (
+          <span>显示 {visibleGroups.length} / {groups.length} 组；清理包含所有已选文件</span>
+        ) : null}
+      </div>
+
+      <ReviewPagination label="重复组" page={page} total={visibleGroups.length} onPageChange={(nextPage) => {
+        focusAfterPage.current = true;
+        setGroupPage(nextPage);
+      }} />
+      {visibleGroups.length > REVIEW_PAGE_SIZE ? <p className="review-page-scope">分页只改变显示；清理包含所有已选文件。</p> : null}
+
+      {confirmRestore ? (
+        <div
+          aria-describedby="restore-help"
+          aria-label="恢复全部建议确认"
+          className="restore-confirmation"
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && !selectionPending) {
+              event.preventDefault();
+              closeRestoreConfirmation();
+            }
+          }}
+          role="group"
+        >
+          <p id="restore-help">恢复全部建议将覆盖所有人工选择。</p>
+          <button className="button button--ghost" disabled={selectionPending} onClick={closeRestoreConfirmation} ref={cancelRestoreRef} type="button">
+            取消恢复
+          </button>
+          <button
+            className="button button--primary"
+            disabled={selectionPending}
+            onClick={async () => {
+              await onRestoreAll();
+              closeRestoreConfirmation();
+            }}
+            type="button"
+          >
+            确认恢复全部建议
+          </button>
+        </div>
+      ) : null}
 
       {issue ? (
         <div className="inline-issue inline-issue--danger" role="alert">
@@ -158,147 +249,21 @@ export function ReviewStage({
         </div>
       ) : null}
 
-      <div className="review-list" data-scroll-region="content">
+      <div className="review-list" data-scroll-region="content" ref={listRef} tabIndex={-1} aria-label="重复文件列表">
+        <ScanIssues issues={issues} />
         <div className="review-list__head" aria-hidden="true">
           <span>文件</span>
           <span>当前选择</span>
           <span>预计可释放</span>
         </div>
 
-        {groups.map((group, groupIndex) => {
-          const cleanups = cleanupCount(group);
-          const keptCount = group.files.length - cleanups;
-          const isOpen = expandedGroupIds.has(group.id);
-
-          return (
-            <article className={`review-group ${isOpen ? "is-open" : ""}`} key={group.id}>
-              <button
-                aria-expanded={isOpen}
-                className="review-group__head"
-                onClick={() => onToggleGroup(group.id)}
-                type="button"
-              >
-                <span className="review-group__chevron">
-                  <Icon name="chevron" size={14} />
-                </span>
-                <span className="review-group__name">
-                  <strong>{group.files[0]?.name ?? "未命名文件"}</strong>
-                  <small>
-                    {group.files.length} 份 · 每份 {formatBytes(group.sizeBytes)}
-                  </small>
-                </span>
-                <span className="review-group__metric">
-                  <strong>{cleanups ? `回收 ${cleanups} 份` : "全部保留"}</strong>
-                  <small>保留 {keptCount} 份</small>
-                </span>
-                <span className="review-group__metric">
-                  <strong>{formatBytes(group.reclaimableBytes)}</strong>
-                  <small>{cleanups ? "当前选择" : "未选择回收"}</small>
-                </span>
-              </button>
-
-              {isOpen ? (
-                <div className="review-group__files">
-                  <div className="review-group__toolbar">
-                    <span>
-                      <strong>处理选择</strong> · 勾选的文件将进入回收站
-                    </span>
-                    <button
-                      className="text-button"
-                      disabled={selectionPending || cleanups === 0}
-                      onClick={() => onKeepAll(group.id)}
-                      type="button"
-                    >
-                      全部保留
-                    </button>
-                  </div>
-
-                  {group.files.map((file, fileIndex) => {
-                    const isLastKeeper = !file.cleanup && keptCount === 1;
-                    const lastKeeperHelpId = isLastKeeper
-                      ? `last-keeper-${groupIndex}-${fileIndex}`
-                      : undefined;
-                    const state = file.cleanup ? "移至回收站" : "保留";
-
-                    return (
-                      <article
-                        className={`review-file-row ${file.cleanup ? "is-cleanup" : "is-keeper"}`}
-                        key={file.path}
-                      >
-                        <input
-                          aria-describedby={lastKeeperHelpId}
-                          aria-label={`移至回收站 ${file.name}`}
-                          checked={file.cleanup}
-                          disabled={selectionPending || isLastKeeper}
-                          onChange={(event) =>
-                            onDecision(group.id, file.path, event.currentTarget.checked)
-                          }
-                          title={
-                            isLastKeeper
-                              ? "每组至少保留一份；先取消另一份的回收选择即可更换保留项"
-                              : undefined
-                          }
-                          type="checkbox"
-                        />
-                        {lastKeeperHelpId ? (
-                          <span className="visually-hidden" id={lastKeeperHelpId}>
-                            每组必须保留至少一份；先取消另一份的回收选择即可更换保留项。
-                          </span>
-                        ) : null}
-                        <div className="file-copy" title={file.path}>
-                          <p>{fileNameFromPath(file.path)}</p>
-                          <small>{formatRelativePath(root, file.path)}</small>
-                        </div>
-                        <time className="review-file-row__date" dateTime={file.modifiedAt}>
-                          {formatDate(file.modifiedAt)}
-                        </time>
-                        <span className="review-file-row__state">{state}</span>
-                        <button
-                          aria-label={`仅回收此文件：${file.name}`}
-                          className="review-single-cleanup"
-                          disabled={selectionPending}
-                          onClick={() => onRequestSingleCleanup(group.id, file.path)}
-                          title={`仅回收此文件：${file.name}`}
-                          type="button"
-                        >
-                          <Icon name="trash" size={15} />
-                        </button>
-                        <details className="review-row-menu">
-                          <summary
-                            aria-haspopup="true"
-                            aria-label={`更多操作 ${file.name}`}
-                          >
-                            <span aria-hidden="true">•••</span>
-                          </summary>
-                          <div className="review-row-menu__panel">
-                            <button
-                              onClick={(event) => {
-                                closeMenu(event.currentTarget);
-                                onRevealFile(file.path);
-                              }}
-                              type="button"
-                            >
-                              在资源管理器中显示
-                            </button>
-                            <button
-                              onClick={(event) => {
-                                closeMenu(event.currentTarget);
-                                onCopyPath(file.path);
-                              }}
-                              type="button"
-                            >
-                              复制完整路径
-                            </button>
-                          </div>
-                        </details>
-                      </article>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </article>
-          );
-        })}
+        {visibleGroups.length === 0 ? <p className="review-filter-empty">没有符合筛选的重复组。清除搜索或关闭筛选可查看全部结果。</p> : null}
+        {visibleGroups.slice(page * REVIEW_PAGE_SIZE, (page + 1) * REVIEW_PAGE_SIZE).map((group) => (
+          <ReviewGroup key={group.id} root={root} group={group} search={search}
+            isOpen={expandedGroupIds.has(group.id)} selectionPending={selectionPending}
+            onToggleGroup={onToggleGroup} onDecision={onDecision} onCopyPath={onCopyPath}
+            onRevealFile={onRevealFile} onRequestSingleCleanup={onRequestSingleCleanup} onKeepAll={onKeepAll} />
+        ))}
       </div>
     </section>
   );
