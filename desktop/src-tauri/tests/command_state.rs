@@ -8,7 +8,7 @@ use desktop_lib::commands::{validate_scan_root, AppState, CleanupTarget, Command
 use desktop_lib::domain::{
     CleanupItemResult, CleanupProgress, CleanupReport, CleanupStatus, ProgressStage, ScanProgress,
 };
-use desktop_lib::scanner::{CancellationToken, DuplicateScanner};
+use desktop_lib::scanner::{validated_root, CancellationToken, DuplicateScanner};
 
 struct NoopTrash;
 
@@ -27,7 +27,7 @@ fn fixture_directory() -> PathBuf {
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join("a.bin"), b"same").unwrap();
     fs::write(root.join("b.bin"), b"same").unwrap();
-    root
+    validated_root(&root).expect("normalize command fixture root")
 }
 
 fn multiple_group_fixture_directory() -> PathBuf {
@@ -41,7 +41,7 @@ fn multiple_group_fixture_directory() -> PathBuf {
     fs::write(root.join("z-one-copy.bin"), b"same-one").unwrap();
     fs::write(root.join("a-two.bin"), b"same-two-content").unwrap();
     fs::write(root.join("z-two-copy.bin"), b"same-two-content").unwrap();
-    root
+    validated_root(&root).expect("normalize multi-group fixture root")
 }
 
 #[test]

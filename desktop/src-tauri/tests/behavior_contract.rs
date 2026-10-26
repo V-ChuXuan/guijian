@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use desktop_lib::cleanup::{CleanupService, TrashPort};
 use desktop_lib::domain::{CleanupStatus, DuplicateGroup, ProgressStage, ScanProgress};
-use desktop_lib::scanner::{CancellationToken, DuplicateScanner};
+use desktop_lib::scanner::{validated_root, CancellationToken, DuplicateScanner};
 use desktop_lib::selection::{recommended_selection, update_selection, SelectionError};
 use serde::Deserialize;
 
@@ -111,10 +111,12 @@ impl ContractDirectory {
             "guijian-contract-{name}-{}-{unique}",
             std::process::id()
         ));
-        let root = base.join("scan-root");
+        // Exercise a noncanonical TEMP alias without changing process-wide environment.
+        let root = base.join("fixture-parent").join("..").join("scan-root");
         let external_root = base.join("outside-root");
         fs::create_dir_all(&root).expect("create contract scan root");
         fs::create_dir_all(&external_root).expect("create contract external root");
+        let root = validated_root(&root).expect("normalize contract scan root");
 
         for entry in &manifest.files {
             let path = safe_join(&root, &entry.path);

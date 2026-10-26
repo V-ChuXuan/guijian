@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use desktop_lib::cleanup::{CleanupService, TrashPort};
 use desktop_lib::domain::{CleanupStatus, ProgressStage};
-use desktop_lib::scanner::{CancellationToken, DuplicateScanner};
+use desktop_lib::scanner::{validated_root, CancellationToken, DuplicateScanner};
 use desktop_lib::selection::{
     recommended_selection, update_selection, validate_selection, SelectionError,
 };
@@ -23,6 +23,7 @@ impl TestDirectory {
         let path =
             std::env::temp_dir().join(format!("guijian-{name}-{}-{unique}", std::process::id()));
         fs::create_dir_all(&path).expect("create test directory");
+        let path = validated_root(&path).expect("normalize test directory");
         Self { path }
     }
 
