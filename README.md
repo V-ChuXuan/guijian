@@ -1,75 +1,75 @@
 <div align="center">
 
-<img src="desktop/assets/app-icon.svg" width="88" height="88" alt="Guijian icon">
+<img src="desktop/assets/app-icon.svg" width="88" height="88" alt="归简图标">
 
 # 归简
 
-**Find exact duplicate files by content, review your choices, and move copies to the Windows Recycle Bin.**
+**按内容找出完全重复的文件，核对后将副本移入 Windows 回收站。**
 
-Choose a folder → analyze files → review copies → confirm cleanup. A Windows desktop tool for people who want to organize duplicates while keeping control of what stays.
+选择文件夹 → 分析文件 → 检查副本 → 确认清理。适合希望整理重复文件、同时保留人工决定权的 Windows 用户。
 
-[Download](https://github.com/V-ChuXuan/guijian/releases/latest) · [Development](#development) · [English](README.md) · [简体中文](README.zh-CN.md)
+[下载安装包](https://github.com/V-ChuXuan/guijian/releases/latest) · [开发](#开发) · [简体中文](README.md) · [English](README.en.md)
 
 </div>
 
-This README describes the current source. Check the corresponding release notes for the features included in an installer.
+以下介绍以当前源码为准；安装包功能请以对应发布说明为准。
 
-## Quick Start
+## 快速开始
 
-Requires Windows 10 / 11 x64 and Microsoft Edge WebView2 Runtime. Using the installer does not require Node.js or Rust.
+需要 Windows 10 / 11 x64 和 Microsoft Edge WebView2 Runtime，普通使用无需安装 Node.js 或 Rust。
 
-1. Download the Windows x64 installer from [Releases](https://github.com/V-ChuXuan/guijian/releases/latest) and verify it against the release's `SHA256SUMS.txt`.
-2. Install and open Guijian, then select a folder to inspect.
-3. Wait for analysis and review any paths that could not be checked and their reasons.
-4. Check the keep/recycle choices in each group, or keep the whole group.
-5. Select “检查清理内容” (review cleanup), check the totals, and confirm moving the selected copies to the Recycle Bin.
+1. 从 [Releases](https://github.com/V-ChuXuan/guijian/releases/latest) 下载 Windows x64 安装包，用发布页的 `SHA256SUMS.txt` 核对文件。
+2. 安装并打开归简，选择一个要检查的文件夹。
+3. 等待分析完成，查看未完成检查的项目及原因。
+4. 核对每组文件的保留与回收选择，或将整组全部保留。
+5. 点击“检查清理内容”，核对数量后确认移至回收站。
 
-The current installer has no Authenticode signature; Windows may show an unknown publisher. Installation, upgrade and uninstall still need [isolated validation](docs/INSTALLATION_VALIDATION.md).
+当前安装包未进行 Authenticode 代码签名，Windows 可能显示“未知发布者”。安装、升级和卸载仍待完成[隔离验收](docs/INSTALLATION_VALIDATION.md)。
 
-## Features
+## 功能
 
-- **Content-based matching:** only nonempty regular files with equal sizes and full SHA-256 hashes appear as duplicates; similar names are insufficient.
-- **Manual review:** change individual keep/recycle choices or keep an entire group. Restoring recommendations requires confirmation before replacing your choices.
-- **Search and filters:** search names or paths, or show groups with cleanup selections. Filters affect display only; cleanup still includes selections across the entire session.
-- **Paged review:** display up to 50 groups per page and 50 files per expanded group page. Choices persist across pages; search covers the full session and opens the page containing the first matching file. Cleanup records and expanded scan diagnostics also show up to 50 entries per page.
-- **Single-file and batch cleanup:** recycling one file updates the current results without rescanning or resetting choices in other groups.
-- **Progress and stop:** see scan phases, cleanup counts and the current path. A cleanup stop takes effect after the current file finishes; completed work is not rolled back.
-- **Result details:** failed or skipped items show paths and reasons, with copy and reveal actions. View successful records separately or return to inspect remaining selections.
-- **Keyboard handling:** menu actions return focus to their trigger; single-file confirmation exposes the complete path relative to the scanned folder to keyboard users. Rescanning or changing folders asks before discarding manual changes.
+- **按内容判重**：只列出大小和完整 SHA-256 一致的非空普通文件，不以文件名相似作为依据。
+- **人工审阅**：逐个调整保留与回收选择、整组全部保留；恢复建议前先确认，避免覆盖人工选择。
+- **检索与筛选**：按文件名或路径搜索，或仅看待清理组。筛选只改变展示，清理仍包含整个会话的已选文件。
+- **分段审阅**：每页最多显示 50 个重复组，每个展开组每页最多显示 50 个文件；翻页保留选择，搜索覆盖完整会话并定位首个命中文件所在页。处理记录和展开的扫描异常也按每页最多 50 项显示。
+- **单项与批量清理**：单独回收一项后更新当前结果，不重新扫描，保留其他组的人工选择。
+- **进度与停止**：显示扫描阶段、清理计数和当前文件；清理停止在当前文件完整处理后生效，不回滚已完成项。
+- **处理详情**：失败或跳过项直接显示路径和原因，可复制或定位；成功记录可另行查看，剩余选择可返回检查。
+- **键盘操作**：菜单操作后返回触发器焦点；单文件确认支持键盘读取完整相对路径。更换文件夹或重扫前会确认是否丢弃人工修改。
 
-## Architecture
+## 架构
 
-Duplicate detection has three stages: group by file size, compare SHA-256 hashes of the first 64 KiB, then compute full SHA-256 hashes. The first two stages reduce full reads; final groups still require equal sizes and full hashes.
+判重方式分为三步：按文件大小筛选，比较前 64 KiB 的 SHA-256，最后计算完整 SHA-256。前两步减少完整读取，最终分组仍以大小和完整哈希为准。
 
-Cleanup protections:
+清理保护包括：
 
-- The default recommendation keeps the copy with the shortest full path. You can change it before cleanup; each group must retain at least one copy.
-- Before acting, recheck the selected file and at least one retained copy for identity, size, modification time and full content. A changed target or lack of a verified retained copy prevents recycling.
-- Recycle only confirmed paths. Recycling HTML does not include unselected associated resource folders; there is no permanent-delete option.
-- Scanning and cleanup run locally. File paths and contents are not uploaded.
-- Closing the native window during scanning or cleanup is blocked with a stop-first notice. Normal close is available after the result returns.
+- 默认建议保留完整路径最短的一份，执行前可调整；每组至少保留一份。
+- 执行前重新核验待清理文件与至少一份保留副本的身份、大小、修改时间和完整内容；目标变化或没有可验证保留副本时不回收。
+- 只回收确认路径；回收 HTML 时不连带处理未选择的资源目录，不提供永久删除选项。
+- 扫描和清理在本机完成，文件路径与内容不上传。
+- 扫描或清理中关闭窗口会被拦截并提示先停止；等待结果返回后可正常关闭。
 
-A command error means the cleanup result could not be confirmed, not that no files were processed. The UI keeps the actual error and does not retry automatically. Recycled capacity is an estimate; moving files to the Recycle Bin does not immediately free that space. See the [cleanup and session contract](docs/CLEANUP_CONTRACT.md).
+清理异常只表示未能确认结果，不能据此认定没有文件被处理；界面保留具体错误，不自动重试。移入回收站的容量为估算，并不意味着立即释放磁盘空间。详见[清理与会话合同](docs/CLEANUP_CONTRACT.md)。
 
-Single-file cleanup distinguishes reported failures and known pre-operation refusals from uncertain outcomes. An uncertain result keeps the actual error and offers a return to inspect file state rather than direct resubmission.
+单文件清理区分可信报告失败、明确前置拒绝和未知结果。结果未知时保留实际错误，提供返回检查文件状态，不直接再次提交回收。
 
-## Limitations
+## 什么时候不该用
 
-Usage limits:
+使用限制：
 
-- No similarity matching for images, videos or other near-duplicate content. Empty files, symbolic links and Windows reparse points are not scanned as duplicate candidates.
-- One root folder per scan; no combined multi-root scan or custom exclusions yet.
-- Shell paths reaching 260 UTF-16 units are flagged before confirmation and rejected during cleanup. Choices and estimates remain unchanged; confirmation states when estimates include affected selected files. Shorten the path and rescan; Recycle Bin recovery for those paths has not been verified.
-- Review is paged, but search still examines the full session; response depends on data size and hardware. The repository's rendering benchmark uses a synthetic review component, not the full app, disk scanning or a typical-hardware guarantee.
-- Network shares, removable media, the full installation lifecycle and real screen-reader behavior have not completed validation. Local checks do not establish support for these cases.
+- 不识别相似图片、视频或其他近似内容，不处理空文件，不扫描符号链接或 Windows 重解析点。
+- 每次只扫描一个根文件夹，暂不支持多目录联合扫描或自定义排除规则。
+- Shell 路径达到 260 个 UTF-16 单元时，确认前提示限制，清理时仍拒绝回收。选择和估算保持原口径；确认页会说明容量包含受限的已选文件。缩短路径后需重新扫描，这类路径的回收站恢复能力尚未验证。
+- 审阅采用分页，但搜索仍检查完整会话，响应取决于数据规模和硬件。仓库的渲染基准只覆盖合成审阅组件，不代表完整应用、磁盘扫描或普通硬件的表现。
+- 网络共享、可移动介质、完整安装生命周期及真实读屏表现尚未完成验收，不能由本地专项通过推导为已支持。
 
-Guijian cannot determine a file's value to you. Keep independent backups of important data.
+归简不能判断文件对你的实际价值。重要数据仍应保留独立备份。
 
-## Development
+## 开发
 
-Building from source requires Node.js 24.12.0, pnpm 12.8.1, Rust 1.97.0, Microsoft C++ Build Tools and WebView2 Runtime. Versions are pinned in `desktop/.node-version`, `desktop/package.json` and `desktop/src-tauri/rust-toolchain.toml`.
+从源码运行需要 Node.js 24.12.0、pnpm 12.8.1、Rust 1.97.0、Microsoft C++ 构建工具和 WebView2 Runtime。版本分别固定在 `desktop/.node-version`、`desktop/package.json` 与 `desktop/src-tauri/rust-toolchain.toml`。
 
-Start from the repository root:
+在仓库根目录启动：
 
 ```powershell
 cd desktop
@@ -77,20 +77,20 @@ pnpm install --frozen-lockfile
 pnpm tauri dev
 ```
 
-Dependency installation changes the environment; development starts a native GUI.
+依赖安装会更改环境，开发命令会启动原生 GUI。
 
-Build the NSIS installer from the repository root:
+从仓库根目录构建 NSIS 安装包：
 
 ```powershell
 cd desktop
 pnpm tauri build
 ```
 
-Output goes to `desktop/src-tauri/target/release/bundle/nsis/`.
+构建产物位于 `desktop/src-tauri/target/release/bundle/nsis/`。
 
-For local verification or CI handoff, retain the installer with checksums, source fingerprints and actual check records using [candidate evidence](docs/CANDIDATE_EVIDENCE.md). CI candidates are retained for a requested 14 days; they are not published releases or proof of installation validation.
+本地验收或CI交接时，可用[候选包留档](docs/CANDIDATE_EVIDENCE.md)一起保存安装包、校验和、源码指纹及真实检查记录。CI候选请求保留14天，不等于已发布版本或已通过安装验收。
 
-Start routine checks from the repository root:
+常规检查从仓库根目录开始：
 
 ```powershell
 cd desktop
@@ -103,12 +103,12 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-[Windows CI](.github/workflows/ci.yml) includes routine checks and an NSIS build; it does not publish installers.
+[Windows CI](.github/workflows/ci.yml)包含常规检查和 NSIS 构建，不发布安装包。
 
 <details>
-<summary>Real Windows checks and rendering benchmark</summary>
+<summary>真实 Windows 专项与渲染基准</summary>
 
-Run each block separately from the repository root:
+从仓库根目录分别运行：
 
 ```powershell
 cd desktop/src-tauri
@@ -123,24 +123,24 @@ node scripts/single-cleanup-smoke.mjs
 node scripts/native-accessibility.mjs
 ```
 
-The first two check types recycle their own synthetic files; the benchmark starts isolated Edge. Each block starts at the repository root, not in the previous block's working directory.
+前两类专项会回收自建合成文件；基准会启动独立 Edge。每段命令均从仓库根目录开始，不要在上一段的目录中接续运行。
 
-Ordinary `cargo test` skips the real Recycle Bin checks. Explicit checks cover ordinary recycling, an occupied file, HTML resource isolation and long-path rejection. Samples stay in the Recycle Bin; it is never emptied by these tests. The manual [Windows release validation](.github/workflows/release-validation.yml) runs the Shell checks on a disposable Windows runner without uploading or publishing an installer.
+普通 `cargo test` 跳过真实回收站专项；专项验证普通回收、占用拒绝、HTML 资源隔离和长路径拒绝，保留回收站内样本，不清空回收站。[手动 Windows release validation](.github/workflows/release-validation.yml)在一次性 Windows runner 中执行 Shell 专项，不上传或发布安装包。
 
-Native checks first require the NSIS build above to produce `desktop/src-tauri/target/release/guijian-desktop.exe`. They cover real WebView2 / Tauri commands, events, stopping, remaining sessions and window close, rather than the full system folder-picker interaction. The rendering benchmark requires frontend dependencies and installed Edge, uses a production build and synthetic state, and excludes backend IPC. The single-cleanup check uses the production App with a synthetic API to verify uncertain results and keyboard access; it does not recycle files or inject real IPC faults. Avoid concurrent builds or tests while sampling. Scripts write assertion or source-fingerprint reports under `desktop/src-tauri/target/output/`.
+原生专项需先完成上面的 NSIS 构建，生成 `desktop/src-tauri/target/release/guijian-desktop.exe`。它覆盖真实 WebView2 / Tauri 命令、事件、停止、剩余会话与窗口关闭，不等于完整系统文件夹选择器操作链。渲染基准需先安装前端依赖并准备 Edge，使用生产构建与合成状态，不含后端 IPC。单项清理专项使用生产 App 与合成 API 验证未知结果和键盘行为，不回收文件，也不注入真实 IPC 故障。采样时避免并发构建或测试。脚本把含断言或源码指纹的报告写入 `desktop/src-tauri/target/output/`。
 
-The accessibility check only reads the initial native window's UIA controls, layout and actual DPI; it does not exercise keyboard input, screen-reader speech or the cleanup flow.
+辅助功能检查只读取原生初始窗口的UIA控件、布局和真实DPI，不验证键盘输入、读屏播报或清理流程。
 
 </details>
 
-Technical documentation: the desktop app uses Tauri 2, React, TypeScript and Rust. See [product scope](docs/PRODUCT.md), [design system](docs/DESIGN.md), [cleanup and session contract](docs/CLEANUP_CONTRACT.md), [native accessibility checks](docs/ACCESSIBILITY_VALIDATION.md), and [isolated installation checks](docs/INSTALLATION_VALIDATION.md).
+技术与文档：桌面端使用 Tauri 2、React、TypeScript 和 Rust。参见[产品定位](docs/PRODUCT.md)、[界面设计系统](docs/DESIGN.md)、[清理与会话合同](docs/CLEANUP_CONTRACT.md)、[原生辅助功能检查](docs/ACCESSIBILITY_VALIDATION.md)及[隔离安装验收](docs/INSTALLATION_VALIDATION.md)。
 
-## License
+## 许可证
 
-Guijian is released under the [MIT License](LICENSE).
+归简基于 [MIT License](LICENSE) 开源。
 
-## Credits
+## 致谢
 
-[WxCleaner](https://github.com/yqxie1991/WxCleaner) inspired the initial idea of organizing files received through WeChat, which Guijian extended to duplicate-file organization in arbitrary folders.
+[WxCleaner](https://github.com/yqxie1991/WxCleaner)启发了归简最初从微信接收文件清理出发的产品思路，随后扩展为任意目录的重复文件整理。
 
-<p align="center"><sub>If Guijian helps you, a ⭐ can help others discover it.</sub></p>
+<p align="center"><sub>如果归简对你有帮助，欢迎点亮 ⭐，让更多有同样需求的人发现它。</sub></p>

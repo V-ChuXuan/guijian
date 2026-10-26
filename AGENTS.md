@@ -5,6 +5,14 @@
 Windows 10/11 exact-duplicate file organizer. Find nonempty files with identical
 content, let users review retained copies, and recycle only confirmed duplicates.
 
+## Documentation and Branches
+
+- Chinese comes first: `README.md` is the complete Chinese homepage and
+  `README.en.md` is the complete English version. Put the Chinese language link
+  before English; keep `README.zh-CN.md` as a short compatibility entry.
+- Keep `main` as this project's only branch unless the user explicitly requests
+  another branch. This convention does not authorize commits or pushes.
+
 ## Code Map and Stack
 
 - `desktop/src-tauri`: Rust 1.97.0 and Tauri 2; manifests and lockfile in this directory.
