@@ -8,7 +8,7 @@
 
 一款 Windows 重复文件整理工具。选一个文件夹，核对重复副本，再决定如何清理。
 
-[![version](https://img.shields.io/badge/version-0.1.0-2d6a4f?style=flat)](https://github.com/V-ChuXuan/guijian/releases/latest)
+[![version](https://img.shields.io/badge/version-0.2.0-2d6a4f?style=flat)](https://github.com/V-ChuXuan/guijian/releases/latest)
 [![platform](https://img.shields.io/badge/platform-Windows%20x64-2d6a4f?style=flat)](#快速开始)
 [![license](https://img.shields.io/badge/license-MIT-2d6a4f?style=flat)](LICENSE)
 
@@ -33,18 +33,19 @@
 | --- | --- |
 | 找出真正重复的文件 | 按大小和完整 SHA-256 比对非空文件，不靠文件名猜测 |
 | 自己决定留下哪份 | 调整每个文件的选择，或将整组全部保留 |
+| 审阅大量副本 | 按文件名或路径搜索、只看待清理组，并分页检查文件 |
 | 核对文件位置 | 查看副本完整路径，复制路径或在资源管理器中定位文件 |
 | 分次整理 | 单独回收一个文件，或确认后批量处理 |
-| 查看清理结果 | 查看已回收、跳过与失败的记录和原因 |
+| 查看清理结果 | 查看未处理文件的路径和原因，复制或定位后返回继续检查 |
 
-[更多审阅与清理操作](docs/DEVELOPMENT.md#审阅与结果细节)。
+[更多审阅与清理操作](docs/DEVELOPMENT.md#审阅与结果细节) · [版本更新](CHANGELOG.md)。
 
 ## 用法
 
 扫描和清理都在本机进行，文件内容与路径不上传。
 
 - **先核对，再确认。** 每组至少保留一份；执行前会重新检查待清理文件及保留副本，文件变化时不回收。
-- **扫描可以停止。** 需要中途结束分析时，点击“停止扫描”。
+- **扫描和清理均可停止。** 清理停止在当前文件处理完成后生效；已经回收的文件仍在回收站，尚未处理的选择会保留。
 
 移入回收站不会立即释放磁盘空间。若出现结果未确认的错误，先检查文件状态，再决定下一步；归简不会自动重试。重要文件仍应保留独立备份。
 

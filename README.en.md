@@ -8,7 +8,7 @@
 
 A duplicate-file organizer for Windows. Choose a folder, review its duplicate copies, and decide what to clean up.
 
-[![version](https://img.shields.io/badge/version-0.1.0-2d6a4f?style=flat)](https://github.com/V-ChuXuan/guijian/releases/latest)
+[![version](https://img.shields.io/badge/version-0.2.0-2d6a4f?style=flat)](https://github.com/V-ChuXuan/guijian/releases/latest)
 [![platform](https://img.shields.io/badge/platform-Windows%20x64-2d6a4f?style=flat)](#quick-start)
 [![license](https://img.shields.io/badge/license-MIT-2d6a4f?style=flat)](LICENSE)
 
@@ -33,18 +33,19 @@ The installer is unsigned; Windows may show an unknown publisher.
 | --- | --- |
 | Find exact duplicates | Compare nonempty files by size and full SHA-256, rather than similar names |
 | Decide which copies stay | Change individual choices or keep an entire group |
+| Review many copies | Search by filename or path, filter to groups awaiting cleanup, and page through files |
 | Check file locations | Inspect full paths, copy a path, or reveal a copy in File Explorer |
 | Clean up in smaller steps | Recycle one file, or review and confirm a batch |
-| Inspect cleanup results | View recycled, skipped and failed records with their reasons |
+| Inspect cleanup results | See paths and reasons for unprocessed files, copy or reveal them, and return to review |
 
-[More review and cleanup details](docs/DEVELOPMENT.md#审阅与结果细节) (Chinese).
+[More review and cleanup details](docs/DEVELOPMENT.md#审阅与结果细节) · [Version history](CHANGELOG.md) (Chinese).
 
 ## Usage
 
 Scanning and cleanup run locally. File contents and paths are not uploaded.
 
 - **Review before confirming.** Each group must retain at least one copy. Selected files and retained copies are checked again before cleanup; changed files are not recycled.
-- **Scanning can be stopped.** Select “停止扫描” (stop scanning) to end analysis early.
+- **Scanning and cleanup can be stopped.** Cleanup stops after the current file finishes. Recycled files remain in the Recycle Bin, and unprocessed selections are retained.
 
 Moving files to the Recycle Bin does not immediately free disk space. If an error leaves the result unconfirmed, inspect the files before deciding what to do next; Guijian does not retry automatically. Keep independent backups of important data.
 

@@ -5,7 +5,7 @@
 从项目根目录运行：
 
 ```powershell
-node scripts/candidate-evidence.mjs --installer "desktop/src-tauri/target/release/bundle/nsis/归简_0.1.0_x64-setup.exe" --verification "desktop/src-tauri/target/output/verification.json" --output "desktop/src-tauri/target/output/candidates/local-001"
+node scripts/candidate-evidence.mjs --installer "desktop/src-tauri/target/release/bundle/nsis/归简_0.2.0_x64-setup.exe" --verification "desktop/src-tauri/target/output/verification.json" --output "desktop/src-tauri/target/output/candidates/local-001"
 ```
 
 `verification.json` 由执行者记录，结构为 `{"checks":[{"name":"frontend_tests","status":"passed","command":"pnpm test"}, ...]}`，省略号须换成完整实际记录，不是可直接执行的JSON。必需项目：`node_tests`、`frontend_tests`、`frontend_build`、`rust_fmt`、`rust_clippy`、`rust_tests`、`installer_build`、`windows_shell`、`native_smoke`、`native_close`、`installation`。前七项须通过；专项未执行时明确写 `not_run`，不能以构建成功替代专项验收。状态可为 `passed`、`failed`、`not_run`、`skipped`、`unknown`；可另加浏览器等检查，保留真实命令和报告线索。
