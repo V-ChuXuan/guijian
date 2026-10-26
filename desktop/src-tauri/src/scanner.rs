@@ -208,6 +208,15 @@ impl DuplicateScanner {
             }
         }
 
+        progress(ScanProgress {
+            stage: ProgressStage::Enumerating,
+            scanned_files,
+            scanned_bytes,
+            candidate_files: 0,
+            completed_files: 0,
+            total_files: 0,
+            current_path: None,
+        });
         let candidates: Vec<_> = sizes
             .into_values()
             .filter(|files| files.len() > 1)
@@ -251,6 +260,15 @@ impl DuplicateScanner {
             }
         }
 
+        progress(ScanProgress {
+            stage: ProgressStage::PartialHash,
+            scanned_files,
+            scanned_bytes,
+            candidate_files,
+            completed_files: candidate_files,
+            total_files: candidate_files,
+            current_path: None,
+        });
         let full_candidates: Vec<_> = partials
             .into_values()
             .filter(|files| files.len() > 1)
@@ -291,6 +309,15 @@ impl DuplicateScanner {
             }
         }
 
+        progress(ScanProgress {
+            stage: ProgressStage::FullHash,
+            scanned_files,
+            scanned_bytes,
+            candidate_files,
+            completed_files: full_total,
+            total_files: full_total,
+            current_path: None,
+        });
         let mut groups = full
             .into_values()
             .filter(|files| files.len() > 1)

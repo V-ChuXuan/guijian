@@ -71,14 +71,14 @@
       "kind": "hardlink",
       "path": "hard/10-alias.bin",
       "target": "hard/00-source.bin",
-      "required": false
+      "required": true
     },
     {
       "kind": "symlink",
       "path": "symlink/outside-link.bin",
       "external_path": "outside.bin",
       "external_content_utf8": "inside-symlink-content",
-      "required": false
+      "required": true
     }
   ],
   "expected_groups": [

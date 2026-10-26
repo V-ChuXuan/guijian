@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   tauriDesktopApi,
+  type CleanupProgress,
   type CleanupReport,
   type DesktopApi,
   type DirectorySelection,
@@ -24,6 +25,7 @@ import {
   formatRelativePath,
   normalizeWindowsPath,
 } from "./lib/format";
+import { getRecyclePathIssue } from "./lib/recycle";
 import "./App.css";
 
 type WorkflowStage = 1 | 2 | 3 | 4;
@@ -78,6 +80,21 @@ function cleanupSelection(session: ScanSession | null) {
   );
 }
 
+function selectionBaseline(session: ScanSession): Map<string, boolean> {
+  return new Map(session.groups.flatMap((group) => group.files.map((file) => [file.path, file.cleanup] as const)));
+}
+
+function reconcileBaseline(baseline: ReadonlyMap<string, boolean>, session: ScanSession): Map<string, boolean> {
+  const remaining = new Map(session.groups.flatMap((group) => group.files.map((file) => [file.path, baseline.get(file.path) ?? file.cleanup] as const)));
+  for (const group of session.groups) {
+    if (group.files.every((file) => remaining.get(file.path))) {
+      const keeper = group.files.find((file) => file.recommendedKeeper);
+      if (keeper) remaining.set(keeper.path, false);
+    }
+  }
+  return remaining;
+}
+
 const pageCopy: Record<WorkflowStage, { title: string }> = {
   1: { title: "选择文件夹" },
   2: { title: "正在分析空间" },
@@ -92,8 +109,11 @@ function App({ api = tauriDesktopApi }: AppProps) {
   const [scopeIssue, setScopeIssue] = useState<string | null>(null);
   const [scanView, setScanView] = useState<ScanView>("running");
   const [scanIssue, setScanIssue] = useState<string | null>(null);
+  const [scanProgressIssue, setScanProgressIssue] = useState<string | null>(null);
   const [progress, setProgress] = useState<ScanProgress | null>(null);
   const [session, setSession] = useState<ScanSession | null>(null);
+  const [baseline, setBaseline] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  const [pendingNavigation, setPendingNavigation] = useState<"rescan" | "changeFolder" | null>(null);
   const [expandedGroupIds, setExpandedGroupIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -103,9 +123,13 @@ function App({ api = tauriDesktopApi }: AppProps) {
     useState<SingleCleanupTarget | null>(null);
   const [singleCleanupPending, setSingleCleanupPending] = useState(false);
   const [singleCleanupIssue, setSingleCleanupIssue] = useState<string | null>(null);
+  const [singleCleanupResultUnknown, setSingleCleanupResultUnknown] = useState(false);
   const [cleanupView, setCleanupView] = useState<CleanupView>("confirm");
   const [cleanupReport, setCleanupReport] = useState<CleanupReport | null>(null);
   const [cleanupIssue, setCleanupIssue] = useState<string | null>(null);
+  const [cleanupProgress, setCleanupProgress] = useState<CleanupProgress | null>(null);
+  const [cleanupProgressIssue, setCleanupProgressIssue] = useState<string | null>(null);
+  const [cleanupStopping, setCleanupStopping] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [scanCancelling, setScanCancelling] = useState(false);
   const scanPromiseRef = useRef<Promise<ScanSession> | null>(null);
@@ -114,16 +138,27 @@ function App({ api = tauriDesktopApi }: AppProps) {
   const selectionPendingRef = useRef(false);
   const singleCleanupPendingRef = useRef(false);
   const singleCleanupTriggerRef = useRef<HTMLElement | null>(null);
+  const navigationTriggerRef = useRef<HTMLElement | null>(null);
+  const navigationCancelRef = useRef<HTMLButtonElement>(null);
+  const navigationContinueRef = useRef<HTMLButtonElement>(null);
+  const cleanupRunningRef = useRef(false);
+  const cleanupStoppingRef = useRef(false);
   const titleRef = useRef<HTMLHeadingElement>(null);
 
   const busy =
     (stage === 2 && scanView === "running") ||
     (stage === 4 && cleanupView === "running");
   const selectedCleanup = useMemo(() => cleanupSelection(session), [session]);
+  const hasManualChanges = !!session?.groups.some((group) => group.files.some((file) => baseline.get(file.path) !== file.cleanup));
+
+  useEffect(() => {
+    if (pendingNavigation) navigationCancelRef.current?.focus();
+  }, [pendingNavigation]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let mounted = true;
+    setScanProgressIssue(null);
     void api.subscribeScanProgress((nextProgress) => {
       if (mounted) {
         setProgress(nextProgress);
@@ -134,6 +169,43 @@ function App({ api = tauriDesktopApi }: AppProps) {
       } else {
         stopListening();
       }
+    }).catch((error) => {
+      if (mounted) setScanProgressIssue(`扫描进度暂不可用：${errorMessage(error)}`);
+    });
+    return () => {
+      mounted = false;
+      unlisten?.();
+    };
+  }, [api]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let mounted = true;
+    setCleanupProgressIssue(null);
+    void api.subscribeCleanupProgress((nextProgress) => {
+      if (mounted && cleanupRunningRef.current) setCleanupProgress(nextProgress);
+    }).then((stopListening) => {
+      if (mounted) unlisten = stopListening;
+      else stopListening();
+    }).catch((error) => {
+      if (mounted) setCleanupProgressIssue(`清理进度暂不可用：${errorMessage(error)}`);
+    });
+    return () => {
+      mounted = false;
+      unlisten?.();
+    };
+  }, [api]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let mounted = true;
+    void api.subscribeCloseBlocked(() => {
+      if (mounted) setToast("操作进行中，请先停止后再关闭窗口");
+    }).then((stopListening) => {
+      if (mounted) unlisten = stopListening;
+      else stopListening();
+    }).catch((error) => {
+      if (mounted) setToast(`关闭提示暂不可用：${errorMessage(error)}`);
     });
     return () => {
       mounted = false;
@@ -147,7 +219,7 @@ function App({ api = tauriDesktopApi }: AppProps) {
         ? document.querySelector<HTMLElement>("#page-title")
         : titleRef.current;
     pageTitle?.focus({ preventScroll: true });
-  }, [stage, cleanupView]);
+  }, [stage, cleanupView, scanView, scanCancelling]);
 
   useEffect(() => {
     if (!toast) {
@@ -219,6 +291,7 @@ function App({ api = tauriDesktopApi }: AppProps) {
         return;
       }
       setSession(nextSession);
+      setBaseline(selectionBaseline(nextSession));
       setExpandedGroupIds(
         new Set(nextSession.groups[0] ? [nextSession.groups[0].id] : []),
       );
@@ -244,12 +317,14 @@ function App({ api = tauriDesktopApi }: AppProps) {
       return;
     }
     setScanCancelling(true);
+    setScanIssue(null);
     let cancelRequest: Promise<boolean> | null = null;
     try {
       cancelRequest = api.cancelScan();
       cancelRequestRef.current = cancelRequest;
       const accepted = await cancelRequest;
       if (!accepted) {
+        if (scanPromiseRef.current) setScanIssue("停止请求未被接受，扫描仍在进行，请等待扫描结果。");
         return;
       }
       const activeScan = scanPromiseRef.current;
@@ -258,8 +333,7 @@ function App({ api = tauriDesktopApi }: AppProps) {
       }
       setScanView("cancelled");
     } catch (error) {
-      setScanView("failed");
-      setScanIssue(errorMessage(error));
+      if (scanPromiseRef.current) setScanIssue(errorMessage(error));
     } finally {
       if (cancelRequest && cancelRequestRef.current === cancelRequest) {
         cancelRequestRef.current = null;
@@ -303,27 +377,16 @@ function App({ api = tauriDesktopApi }: AppProps) {
     if (selectionPendingRef.current) {
       return;
     }
-    const group = session?.groups.find((candidate) => candidate.id === groupId);
-    if (!group) {
-      return;
-    }
     selectionPendingRef.current = true;
     setSelectionPending(true);
     setReviewIssue(null);
     try {
-      for (const file of group.files.filter((candidate) => candidate.cleanup)) {
-        const updatedGroup = await api.updateSelection(groupId, file.path, false);
-        setSession((current) =>
-          current
-            ? {
-                ...current,
-                groups: current.groups.map((candidate) =>
-                  candidate.id === groupId ? updatedGroup : candidate,
-                ),
-              }
-            : current,
-        );
-      }
+      const updatedGroup = await api.keepGroup(groupId);
+      setSession((current) =>
+        current
+          ? { ...current, groups: current.groups.map((group) => group.id === groupId ? updatedGroup : group) }
+          : current,
+      );
     } catch (error) {
       setReviewIssue(errorMessage(error));
     } finally {
@@ -333,19 +396,33 @@ function App({ api = tauriDesktopApi }: AppProps) {
   };
 
   const copyPath = async (path: string) => {
+    if (stage === 4) {
+      setCleanupIssue(null);
+    }
     try {
       await api.copyPath(path);
       setToast("路径已复制");
     } catch (error) {
-      setReviewIssue(errorMessage(error));
+      if (stage === 4) {
+        setCleanupIssue(errorMessage(error));
+      } else {
+        setReviewIssue(errorMessage(error));
+      }
     }
   };
 
   const revealFile = async (path: string) => {
+    if (stage === 4) {
+      setCleanupIssue(null);
+    }
     try {
       await api.revealFile(path);
     } catch (error) {
-      setReviewIssue(errorMessage(error));
+      if (stage === 4) {
+        setCleanupIssue(errorMessage(error));
+      } else {
+        setReviewIssue(errorMessage(error));
+      }
     }
   };
 
@@ -357,7 +434,9 @@ function App({ api = tauriDesktopApi }: AppProps) {
     setSelectionPending(true);
     setReviewIssue(null);
     try {
-      setSession(await api.restoreRecommendedSelections());
+      const nextSession = await api.restoreRecommendedSelections();
+      setSession(nextSession);
+      setBaseline(selectionBaseline(nextSession));
     } catch (error) {
       setReviewIssue(errorMessage(error));
     } finally {
@@ -379,6 +458,7 @@ function App({ api = tauriDesktopApi }: AppProps) {
     singleCleanupTriggerRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setSingleCleanupIssue(null);
+    setSingleCleanupResultUnknown(false);
     setSingleCleanupTarget({
       groupId,
       path,
@@ -394,42 +474,48 @@ function App({ api = tauriDesktopApi }: AppProps) {
     const trigger = singleCleanupTriggerRef.current;
     setSingleCleanupTarget(null);
     setSingleCleanupIssue(null);
+    setSingleCleanupResultUnknown(false);
     window.setTimeout(() => trigger?.focus({ preventScroll: true }), 0);
   };
 
   const confirmSingleCleanup = async () => {
     const target = singleCleanupTarget;
-    const currentRoot = session?.root;
-    if (!target || !currentRoot || singleCleanupPendingRef.current) {
+    if (!target || !session || singleCleanupPendingRef.current || singleCleanupResultUnknown) {
       return;
     }
     singleCleanupPendingRef.current = true;
     setSingleCleanupPending(true);
     setSingleCleanupIssue(null);
     try {
-      const preparedSession = await api.prepareSingleCleanup(
-        target.groupId,
-        target.path,
-      );
-      setSession(preparedSession);
-      const report = await api.confirmCleanup();
+      const { report, session: refreshedSession } = await api.confirmCleanup({
+        groupId: target.groupId,
+        path: target.path,
+      });
+      setSession(refreshedSession);
+      setBaseline((current) => reconcileBaseline(current, refreshedSession));
       if (report.movedCount !== 1) {
         const detail = report.items.find((item) => item.status !== "moved_to_trash");
-        throw new Error(detail?.message || "该文件未能移至系统回收站");
+        setSingleCleanupIssue(detail?.message || "该文件未能移至系统回收站");
+        return;
       }
-      const refreshedSession = await api.startScan(currentRoot);
-      setSession(refreshedSession);
-      setExpandedGroupIds(
-        new Set(
-          refreshedSession.groups[0] ? [refreshedSession.groups[0].id] : [],
-        ),
-      );
+      setExpandedGroupIds((current) => new Set(
+        refreshedSession.groups.filter((group) => current.has(group.id)).map((group) => group.id),
+      ));
       setReviewIssue(null);
       setSingleCleanupTarget(null);
       setSingleCleanupIssue(null);
+      const trigger = singleCleanupTriggerRef.current;
       singleCleanupTriggerRef.current = null;
+      window.setTimeout(() => {
+        const nextFocus = trigger?.isConnected ? trigger : document.getElementById("page-title");
+        nextFocus?.focus({ preventScroll: true });
+      }, 0);
     } catch (error) {
       setSingleCleanupIssue(errorMessage(error));
+      const preflightRejection = typeof error === "object" && error !== null &&
+        "code" in error && typeof error.code === "string" &&
+        ["invalid_path", "busy", "unknown_group", "invalid_selection", "no_scan_result"].includes(error.code);
+      setSingleCleanupResultUnknown(!preflightRejection);
     } finally {
       singleCleanupPendingRef.current = false;
       setSingleCleanupPending(false);
@@ -447,15 +533,47 @@ function App({ api = tauriDesktopApi }: AppProps) {
   };
 
   const confirmCleanup = async () => {
+    if (cleanupRunningRef.current) return;
+    cleanupRunningRef.current = true;
+    cleanupStoppingRef.current = false;
+    setCleanupStopping(false);
+    setCleanupProgress(null);
     setCleanupView("running");
     setCleanupIssue(null);
     try {
-      const report = await api.confirmCleanup();
+      const { report, session: refreshedSession } = await api.confirmCleanup();
+      setSession(refreshedSession);
+      setBaseline((current) => reconcileBaseline(current, refreshedSession));
       setCleanupReport(report);
       setCleanupView("complete");
     } catch (error) {
       setCleanupIssue(errorMessage(error));
       setCleanupView("failed");
+    } finally {
+      cleanupRunningRef.current = false;
+      cleanupStoppingRef.current = false;
+      setCleanupStopping(false);
+    }
+  };
+
+  const stopCleanup = async () => {
+    if (!cleanupRunningRef.current || cleanupStoppingRef.current) return;
+    cleanupStoppingRef.current = true;
+    setCleanupStopping(true);
+    setCleanupIssue(null);
+    try {
+      const accepted = await api.cancelCleanup();
+      if (!accepted && cleanupRunningRef.current) {
+        cleanupStoppingRef.current = false;
+        setCleanupStopping(false);
+        setCleanupIssue("清理已结束或停止请求未被接受，正在等待结果。");
+      }
+    } catch (error) {
+      if (cleanupRunningRef.current) {
+        cleanupStoppingRef.current = false;
+        setCleanupStopping(false);
+        setCleanupIssue(errorMessage(error));
+      }
     }
   };
 
@@ -463,6 +581,7 @@ function App({ api = tauriDesktopApi }: AppProps) {
     setStage(1);
     setSelection(null);
     setSession(null);
+    setBaseline(new Map());
     setProgress(null);
     setExpandedGroupIds(new Set());
     setCleanupReport(null);
@@ -472,21 +591,46 @@ function App({ api = tauriDesktopApi }: AppProps) {
     setCleanupIssue(null);
   };
 
+  const closeNavigationConfirmation = () => {
+    setPendingNavigation(null);
+    window.setTimeout(() => navigationTriggerRef.current?.focus({ preventScroll: true }), 0);
+  };
+
+  const requestNavigation = (action: "rescan" | "changeFolder") => {
+    if (busy || selectionPendingRef.current) return;
+    if (hasManualChanges) {
+      navigationTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      setPendingNavigation(action);
+    } else if (action === "rescan") {
+      void startScan();
+    } else {
+      resetWorkflow();
+    }
+  };
+
   const navigateBack = (target: number) => {
     if (busy) {
       return;
     }
     if (target === 1) {
-      setStage(1);
+      requestNavigation("changeFolder");
     }
   };
 
   const header =
-    stage === 4 && cleanupView === "complete"
-      ? { title: "清理结果" }
-      : stage === 4 && cleanupView === "failed"
-        ? { title: "清理未执行" }
-        : pageCopy[stage];
+    stage === 2 && scanView === "cancelled"
+      ? { title: "分析已停止" }
+      : stage === 2 && scanView === "failed"
+        ? { title: "分析未完成" }
+        : stage === 2 && scanCancelling
+          ? { title: "正在停止分析" }
+          : stage === 4 && cleanupView === "running"
+            ? { title: cleanupStopping ? "正在停止清理" : "正在清理" }
+          : stage === 4 && cleanupView === "complete"
+            ? { title: "清理结果" }
+            : stage === 4 && cleanupView === "failed"
+              ? { title: "清理结果未确认" }
+              : pageCopy[stage];
   const reviewRoot = session ? normalizeWindowsPath(session.root) : "";
 
   return (
@@ -505,7 +649,7 @@ function App({ api = tauriDesktopApi }: AppProps) {
             <button
               className="button button--quiet"
               disabled={selectionPending}
-              onClick={startScan}
+              onClick={() => requestNavigation("rescan")}
               type="button"
             >
               <Icon name="scan" size={15} />
@@ -514,7 +658,7 @@ function App({ api = tauriDesktopApi }: AppProps) {
             <button
               className="button button--quiet"
               disabled={selectionPending}
-              onClick={resetWorkflow}
+              onClick={() => requestNavigation("changeFolder")}
               type="button"
             >
               <Icon name="folder" size={15} />
@@ -552,12 +696,13 @@ function App({ api = tauriDesktopApi }: AppProps) {
             />
           ) : null}
           {stage === 2 ? (
-            <ScanStage issue={scanIssue} progress={progress} state={scanView} />
+            <ScanStage issue={scanIssue} progress={progress} progressIssue={scanProgressIssue} state={scanView} stopping={scanCancelling} />
           ) : null}
           {stage === 3 && session ? (
             <ReviewStage
               groups={session.groups}
               issue={reviewIssue}
+              issues={session.issues}
               onCopyPath={copyPath}
               onDecision={updateDecision}
               onKeepAll={keepAll}
@@ -592,7 +737,12 @@ function App({ api = tauriDesktopApi }: AppProps) {
           {stage === 4 && session ? (
             <CleanupStage
               issue={cleanupIssue}
+              onCopyPath={copyPath}
+              onRevealFile={revealFile}
               report={cleanupReport}
+              progress={cleanupProgress}
+              progressIssue={cleanupProgressIssue}
+              stopping={cleanupStopping}
               session={session}
               view={cleanupView}
             />
@@ -665,12 +815,21 @@ function App({ api = tauriDesktopApi }: AppProps) {
                   检查清理内容 <Icon name="chevron" size={17} />
                 </button>
               ) : (
-                <button className="button button--primary" onClick={resetWorkflow} type="button">
+                <button className="button button--primary" onClick={() => requestNavigation("changeFolder")} type="button">
                   检查其他文件夹
                 </button>
               )
             }
           />
+        ) : null}
+
+        {stage === 4 && session && cleanupView === "running" ? (
+          <ActionDock secondary={
+            <button className="button button--ghost" disabled={cleanupStopping} onClick={stopCleanup} type="button">
+              <Icon name="stop" size={17} />
+              {cleanupStopping ? "正在等待当前文件完成…" : "完成当前文件后停止"}
+            </button>
+          } />
         ) : null}
 
         {stage === 4 && session && cleanupView !== "running" ? (
@@ -685,7 +844,7 @@ function App({ api = tauriDesktopApi }: AppProps) {
                   返回调整
                 </button>
               ) : cleanupView === "complete" ? (
-                <button className="button button--ghost" onClick={resetWorkflow} type="button">
+                <button className="button button--ghost" onClick={() => requestNavigation("changeFolder")} type="button">
                   检查其他文件夹
                 </button>
               ) : null
@@ -700,9 +859,15 @@ function App({ api = tauriDesktopApi }: AppProps) {
                   <Icon name="archive" size={18} /> 确认移至回收站
                 </button>
               ) : cleanupView === "complete" ? (
-                <button className="button button--primary" onClick={startScan} type="button">
-                  重新扫描当前文件夹
-                </button>
+                cleanupReport && (cleanupReport.cancelled || cleanupReport.failedCount > 0 || cleanupReport.skippedCount > 0) ? (
+                  <button className="button button--primary" onClick={() => setStage(3)} type="button">
+                    检查未处理文件
+                  </button>
+                ) : (
+                  <button className="button button--primary" onClick={() => requestNavigation("rescan")} type="button">
+                    重新扫描当前文件夹
+                  </button>
+                )
               ) : null
             }
           />
@@ -713,6 +878,41 @@ function App({ api = tauriDesktopApi }: AppProps) {
         {toast}
       </div>
 
+      {pendingNavigation ? (
+        <div className="single-cleanup-backdrop">
+          <div
+            aria-describedby="navigation-help"
+            aria-labelledby="navigation-title"
+            aria-modal="true"
+            className="single-cleanup-dialog"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                closeNavigationConfirmation();
+              } else if (event.key === "Tab") {
+                event.preventDefault();
+                (document.activeElement === navigationCancelRef.current ? navigationContinueRef : navigationCancelRef).current?.focus();
+              }
+            }}
+            role="dialog"
+          >
+            <header className="single-cleanup-dialog__header"><h2 id="navigation-title">保留当前人工选择？</h2></header>
+            <p className="navigation-confirmation-copy" id="navigation-help">继续将丢弃当前人工选择。取消可返回检查结果。</p>
+            <footer className="single-cleanup-dialog__actions">
+              <button className="button button--ghost" onClick={closeNavigationConfirmation} ref={navigationCancelRef} type="button">取消</button>
+              <button className="button button--primary" onClick={() => {
+                const action = pendingNavigation;
+                setPendingNavigation(null);
+                if (action === "rescan") void startScan();
+                else resetWorkflow();
+              }} ref={navigationContinueRef} type="button">
+                {pendingNavigation === "rescan" ? "继续重新扫描" : "继续更换文件夹"}
+              </button>
+            </footer>
+          </div>
+        </div>
+      ) : null}
+
       {singleCleanupTarget ? (
         <SingleCleanupDialog
           fileName={singleCleanupTarget.fileName}
@@ -720,7 +920,9 @@ function App({ api = tauriDesktopApi }: AppProps) {
           onCancel={closeSingleCleanup}
           onConfirm={confirmSingleCleanup}
           pending={singleCleanupPending}
+          resultUnknown={singleCleanupResultUnknown}
           relativePath={singleCleanupTarget.relativePath}
+          warning={getRecyclePathIssue(singleCleanupTarget.path)}
         />
       ) : null}
     </main>

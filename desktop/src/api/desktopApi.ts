@@ -48,7 +48,7 @@ export interface ScanProgress {
   total: number;
   scannedFiles: number;
   scannedBytes: number;
-  currentPath?: string;
+  currentPath?: string | null;
 }
 
 export type CleanupStatus =
@@ -64,11 +64,32 @@ export interface CleanupItemResult {
 }
 
 export interface CleanupReport {
+  cancelled: boolean;
+  remainingFiles: number;
   reclaimableBytes: number;
   movedCount: number;
   skippedCount: number;
   failedCount: number;
   items: CleanupItemResult[];
+}
+
+export interface CleanupProgress {
+  completedFiles: number;
+  totalFiles: number;
+  currentPath: string | null;
+  movedCount: number;
+  skippedCount: number;
+  failedCount: number;
+}
+
+export interface CleanupTarget {
+  groupId: string;
+  path: string;
+}
+
+export interface CleanupOutcome {
+  report: CleanupReport;
+  session: ScanSession;
 }
 
 export type Unlisten = () => void;
@@ -77,6 +98,9 @@ export interface DesktopApi {
   selectScanRoot(): Promise<DirectorySelection | null>;
   startScan(root: string): Promise<ScanSession>;
   cancelScan(): Promise<boolean>;
+  cancelCleanup(): Promise<boolean>;
+  subscribeCloseBlocked(listener: () => void): Promise<Unlisten>;
+  subscribeCleanupProgress(listener: (progress: CleanupProgress) => void): Promise<Unlisten>;
   subscribeScanProgress(
     listener: (progress: ScanProgress) => void,
   ): Promise<Unlisten>;
@@ -85,9 +109,9 @@ export interface DesktopApi {
     path: string,
     cleanup: boolean,
   ): Promise<DuplicateGroup>;
-  prepareSingleCleanup(groupId: string, path: string): Promise<ScanSession>;
+  keepGroup(groupId: string): Promise<DuplicateGroup>;
   restoreRecommendedSelections(): Promise<ScanSession>;
-  confirmCleanup(): Promise<CleanupReport>;
+  confirmCleanup(target?: CleanupTarget): Promise<CleanupOutcome>;
   copyPath(path: string): Promise<void>;
   revealFile(path: string): Promise<void>;
 }
@@ -132,7 +156,7 @@ interface WireScanProgress {
   scannedBytes: number;
   completedFiles: number;
   totalFiles: number;
-  currentPath?: string;
+  currentPath?: string | null;
 }
 
 interface WireCleanupItem {
@@ -143,6 +167,8 @@ interface WireCleanupItem {
 }
 
 interface WireCleanupReport {
+  cancelled: boolean;
+  remainingFiles: number;
   items: WireCleanupItem[];
   reclaimableBytes: number;
 }
@@ -186,14 +212,13 @@ export function createTauriDesktopApi(): DesktopApi {
     if (!result) {
       throw new Error("扫描完成后未返回结果");
     }
+    const selections = new Map(view.selections.map((selection) => [selection.groupId, selection]));
     const groups = result.groups.map((group) => {
-      const selection = view.selections.find(
-        (candidate) => candidate.groupId === group.id,
-      );
+      const selection = selections.get(group.id);
       if (!selection) {
         throw new Error(`重复组 ${group.id} 缺少选择状态`);
       }
-      if (!recommendedKeepers.has(group.id)) {
+      if (!group.files.some((file) => file.path === recommendedKeepers.get(group.id))) {
         const cleanupPaths = new Set(selection.cleanupPaths);
         recommendedKeepers.set(
           group.id,
@@ -211,6 +236,20 @@ export function createTauriDesktopApi(): DesktopApi {
     };
   };
 
+  const applyGroupSelection = (updated: WireGroupSelection): DuplicateGroup => {
+    const group = wireSession?.result?.groups.find((candidate) => candidate.id === updated.groupId);
+    if (!wireSession || !group) {
+      throw new Error("重复组不存在");
+    }
+    wireSession = {
+      ...wireSession,
+      selections: wireSession.selections.map((selection) =>
+        selection.groupId === updated.groupId ? updated : selection,
+      ),
+    };
+    return mapGroup(group, updated, recommendedKeepers.get(group.id));
+  };
+
   return {
     selectScanRoot: async () => {
       const path = await open({ directory: true, multiple: false });
@@ -226,6 +265,11 @@ export function createTauriDesktopApi(): DesktopApi {
       return mapSession(view);
     },
     cancelScan: () => invoke<boolean>("cancel_scan"),
+    cancelCleanup: () => invoke<boolean>("cancel_cleanup"),
+    subscribeCloseBlocked: (listener) =>
+      listen("operation-close-blocked", () => listener()),
+    subscribeCleanupProgress: (listener) =>
+      listen<CleanupProgress>("cleanup-progress", (event) => listener(event.payload)),
     subscribeScanProgress: async (listener) =>
       listen<WireScanProgress>("scan-progress", (event) => {
         const progress = event.payload;
@@ -239,9 +283,7 @@ export function createTauriDesktopApi(): DesktopApi {
         });
       }),
     updateSelection: async (groupId, path, cleanup) => {
-      const currentSession = wireSession;
-      const result = currentSession?.result;
-      if (!currentSession || !result) {
+      if (!wireSession?.result) {
         throw new Error("当前没有可更新的扫描结果");
       }
       const updated = await invoke<WireGroupSelection>("set_file_cleanup", {
@@ -249,47 +291,42 @@ export function createTauriDesktopApi(): DesktopApi {
         path,
         shouldCleanup: cleanup,
       });
-      wireSession = {
-        ...currentSession,
-        selections: currentSession.selections.map((selection) =>
-          selection.groupId === groupId ? updated : selection,
-        ),
-      };
-      const group = result.groups.find(
-        (candidate) => candidate.id === groupId,
-      );
-      if (!group) {
-        throw new Error("重复组不存在");
-      }
-      return mapGroup(group, updated, recommendedKeepers.get(groupId));
+      return applyGroupSelection(updated);
     },
-    prepareSingleCleanup: async (groupId, path) => {
-      const view = await invoke<WireSessionView>("prepare_single_cleanup", {
-        groupId,
-        path,
-      });
-      wireSession = view;
-      return mapSession(view);
+    keepGroup: async (groupId) => {
+      if (!wireSession?.result) {
+        throw new Error("当前没有可更新的扫描结果");
+      }
+      return applyGroupSelection(await invoke<WireGroupSelection>("keep_group", { groupId }));
     },
     restoreRecommendedSelections: async () => {
       const view = await invoke<WireSessionView>("restore_recommended_selections");
       wireSession = view;
       return mapSession(view);
     },
-    confirmCleanup: async () => {
-      const report = await invoke<WireCleanupReport>("confirm_cleanup");
+    confirmCleanup: async (target) => {
+      const { report, session } = await invoke<{
+        report: WireCleanupReport;
+        session: WireSessionView;
+      }>("confirm_cleanup", { target: target ?? null });
+      const mappedSession = mapSession(session);
+      wireSession = session;
       const movedItems = report.items.filter(
         (item) => item.status === "moved_to_trash",
       );
       return {
-        reclaimableBytes: report.reclaimableBytes,
-        movedCount: movedItems.length,
-        skippedCount: report.items.filter(
-          (item) => item.status === "changed" || item.status === "blocked",
-        ).length,
-        failedCount: report.items.filter((item) => item.status === "failed")
-          .length,
-        items: report.items,
+        session: mappedSession,
+        report: {
+          cancelled: report.cancelled,
+          remainingFiles: report.remainingFiles,
+          reclaimableBytes: report.reclaimableBytes,
+          movedCount: movedItems.length,
+          skippedCount: report.items.filter(
+            (item) => item.status === "changed" || item.status === "blocked",
+          ).length,
+          failedCount: report.items.filter((item) => item.status === "failed").length,
+          items: report.items,
+        },
       };
     },
     copyPath: async (path) => navigator.clipboard.writeText(path),

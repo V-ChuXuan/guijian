@@ -6,12 +6,21 @@ interface ScanStageProps {
   progress: ScanProgress | null;
   state: "running" | "cancelled" | "failed";
   issue: string | null;
+  progressIssue?: string | null;
+  stopping?: boolean;
 }
 
-export function ScanStage({ progress, state, issue }: ScanStageProps) {
-  const percent = progress?.total
-    ? Math.min(100, Math.round((progress.completed / progress.total) * 100))
-    : 0;
+export function ScanStage({ progress, state, issue, progressIssue = null, stopping = false }: ScanStageProps) {
+  const determinate = !progressIssue && progress?.stage !== "enumerating" && !!progress?.total && !stopping;
+  const percent = determinate && progress
+    ? Math.max(0, Math.min(100, Math.floor((progress.completed / progress.total) * 100)))
+    : undefined;
+  const phase = progress?.stage ?? "enumerating";
+  const label = stopping ? "正在停止分析" : progressIssue ? "正在分析文件" : {
+    enumerating: "正在发现文件",
+    partial_hash: "正在初步比对",
+    full_hash: "正在完整比对",
+  }[phase];
 
   if (state === "cancelled") {
     return (
@@ -19,7 +28,7 @@ export function ScanStage({ progress, state, issue }: ScanStageProps) {
         <span className="center-state__icon center-state__icon--quiet">
           <Icon name="stop" size={30} />
         </span>
-        <h2>分析已停止</h2>
+        <p>可以重新分析，或返回选择位置。</p>
       </section>
     );
   }
@@ -44,35 +53,42 @@ export function ScanStage({ progress, state, issue }: ScanStageProps) {
             <Icon name="scan" size={30} />
           </span>
           <div>
-            <strong>扫描中</strong>
-            <p className="path-text" title={progress?.currentPath}>
-              {progress?.currentPath ?? "正在准备…"}
+            <strong aria-live="polite">{label}</strong>
+            <p className="path-text" title={progress?.currentPath ?? undefined}>
+              {progress?.currentPath ?? (progress ? "正在整理本阶段结果…" : "正在准备…")}
             </p>
           </div>
-          <span className="scan-ledger__percent">{percent}%</span>
+          {percent !== undefined ? <span className="scan-ledger__percent">{percent}%</span> : null}
         </div>
         <div
-          aria-label={`分析进度 ${percent}%`}
-          aria-valuemax={100}
-          aria-valuemin={0}
+          aria-label={percent !== undefined ? `当前阶段进度 ${percent}%` : label}
+          aria-valuemax={percent !== undefined ? 100 : undefined}
+          aria-valuemin={percent !== undefined ? 0 : undefined}
           aria-valuenow={percent}
-          className="progress-track"
+          className={`progress-track ${percent === undefined ? "progress-track--indeterminate" : ""}`}
           role="progressbar"
         >
-          <span style={{ width: `${Math.max(percent, 2)}%` }} />
+          <span style={percent !== undefined ? { width: `${percent}%` } : undefined} />
         </div>
+        <p className="scan-phase-count" role={progressIssue ? "status" : undefined}>
+          {progressIssue ? `${progressIssue}，请等待扫描结果。` : phase === "enumerating"
+            ? "正在统计目录，文件总数尚未确定"
+            : `${(progress?.completed ?? 0).toLocaleString("zh-CN")} / ${(progress?.total ?? 0).toLocaleString("zh-CN")} 个候选文件`}
+        </p>
       </div>
 
-      <div className="scan-metrics" aria-live="polite">
+      {issue ? <div className="inline-issue inline-issue--danger" role="alert"><Icon name="warning" /><p>{issue}</p></div> : null}
+
+      {!progressIssue ? <div className="scan-metrics">
         <article>
-          <span>已检查文件</span>
+          <span>已发现文件</span>
           <strong>{(progress?.scannedFiles ?? 0).toLocaleString("zh-CN")}</strong>
         </article>
         <article>
-          <span>已读取容量</span>
+          <span>文件容量</span>
           <strong>{formatBytes(progress?.scannedBytes ?? 0)}</strong>
         </article>
-      </div>
+      </div> : null}
     </section>
   );
 }

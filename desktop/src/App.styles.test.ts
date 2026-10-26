@@ -11,6 +11,12 @@ function ruleBody(selector: string): string {
 }
 
 describe("review group state styling", () => {
+  it("keeps the final confirmation path readable and the dialog inside the viewport", () => {
+    expect(ruleBody(".single-cleanup-dialog__file span")).toMatch(/white-space:\s*normal/);
+    expect(ruleBody(".single-cleanup-dialog__file span")).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(ruleBody(".single-cleanup-dialog")).toMatch(/max-height:\s*calc\(100dvh - 48px\)/);
+    expect(ruleBody(".single-cleanup-dialog")).toMatch(/overflow-y:\s*auto/);
+  });
   it("does not draw a persistent left accent on expanded groups", () => {
     const leftBorderProperty = /border-(?:left|inline-start)\s*:/;
 

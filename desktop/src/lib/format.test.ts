@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import { formatRelativePath, normalizeWindowsPath } from "./format";
+import { formatDate, formatRelativePath, normalizeWindowsPath } from "./format";
+
+describe("文件日期显示", () => {
+  it("按本地时间显示年月日与24小时制时分，连续日期互不影响", () => {
+    expect(formatDate(new Date(2026, 9, 26, 8, 5).toISOString())).toBe("2026/10/26 08:05");
+    expect(formatDate(new Date(2024, 1, 29, 23, 59).toISOString())).toBe("2024/02/29 23:59");
+    expect(formatDate(new Date(2026, 9, 26, 8, 5).toISOString())).toBe("2026/10/26 08:05");
+  });
+
+  it("非法日期仍显示时间未知，不影响下一次有效日期格式化", () => {
+    expect(formatDate("not-a-date")).toBe("时间未知");
+    expect(formatDate("")).toBe("时间未知");
+    expect(formatDate(new Date(2026, 0, 1, 0, 0).toISOString())).toBe("2026/01/01 00:00");
+  });
+});
 
 describe("Windows 路径显示", () => {
   it("将混合和重复分隔符规范化为单个反斜杠", () => {

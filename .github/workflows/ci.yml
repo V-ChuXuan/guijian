@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: desktop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: desktop/.node-version
+
+      - name: Test Node scripts
+        id: node_tests
+        run: node --test ../scripts/native-smoke-exit.test.mjs ../scripts/candidate-evidence.test.mjs
+
+      - name: Install pnpm
+        run: npm install --global pnpm@12.8.1
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test frontend
+        id: frontend_tests
+        run: pnpm test
+
+      - name: Build frontend
+        id: frontend_build
+        run: pnpm build
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.0 --profile minimal --component clippy,rustfmt --target x86_64-pc-windows-msvc
+
+      - name: Check Rust formatting
+        id: rust_fmt
+        working-directory: desktop/src-tauri
+        run: cargo fmt --check
+
+      - name: Lint Rust
+        id: rust_clippy
+        working-directory: desktop/src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test Rust
+        id: rust_tests
+        working-directory: desktop/src-tauri
+        run: cargo test --locked
+
+      - name: Build Windows installer
+        id: installer_build
+        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-sign --bundles nsis -- --locked
+
+      - name: Package candidate evidence
+        env:
+          NODE_TESTS_OUTCOME: ${{ steps.node_tests.outcome }}
+          FRONTEND_TESTS_OUTCOME: ${{ steps.frontend_tests.outcome }}
+          FRONTEND_BUILD_OUTCOME: ${{ steps.frontend_build.outcome }}
+          RUST_FMT_OUTCOME: ${{ steps.rust_fmt.outcome }}
+          RUST_CLIPPY_OUTCOME: ${{ steps.rust_clippy.outcome }}
+          RUST_TESTS_OUTCOME: ${{ steps.rust_tests.outcome }}
+          INSTALLER_BUILD_OUTCOME: ${{ steps.installer_build.outcome }}
+        run: |
+          function Check-Status($outcome) {
+            switch ($outcome) {
+              'success' { 'passed' }
+              'failure' { 'failed' }
+              'skipped' { 'skipped' }
+              default { 'unknown' }
+            }
+          }
+          $checks = @(
+            @{ name = 'node_tests'; status = (Check-Status $env:NODE_TESTS_OUTCOME); command = 'node --test ../scripts/native-smoke-exit.test.mjs ../scripts/candidate-evidence.test.mjs' }
+            @{ name = 'frontend_tests'; status = (Check-Status $env:FRONTEND_TESTS_OUTCOME); command = 'pnpm test' }
+            @{ name = 'frontend_build'; status = (Check-Status $env:FRONTEND_BUILD_OUTCOME); command = 'pnpm build' }
+            @{ name = 'rust_fmt'; status = (Check-Status $env:RUST_FMT_OUTCOME); command = 'cargo fmt --check' }
+            @{ name = 'rust_clippy'; status = (Check-Status $env:RUST_CLIPPY_OUTCOME); command = 'cargo clippy --locked --all-targets -- -D warnings' }
+            @{ name = 'rust_tests'; status = (Check-Status $env:RUST_TESTS_OUTCOME); command = 'cargo test --locked' }
+            @{ name = 'installer_build'; status = (Check-Status $env:INSTALLER_BUILD_OUTCOME); command = 'node node_modules/@tauri-apps/cli/tauri.js build --ci --no-sign --bundles nsis -- --locked' }
+            @{ name = 'windows_shell'; status = 'not_run'; reason = 'Explicit real Windows Shell suite is not run by this job' }
+            @{ name = 'native_smoke'; status = 'not_run'; reason = 'Native WebView2 smoke is not run by this job' }
+            @{ name = 'native_close'; status = 'not_run'; reason = 'Native close-during-cleanup smoke is not run by this job' }
+            @{ name = 'installation'; status = 'not_run'; reason = 'Isolated install/upgrade/uninstall validation is not run by this job' }
+          )
+          $verification = Join-Path (Get-Location) 'src-tauri/target/candidate-verification.json'
+          @{ checks = $checks } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $verification -Encoding utf8
+          $installers = @(Get-ChildItem -LiteralPath 'src-tauri/target/release/bundle/nsis' -Filter '*-setup.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer' }
+          $candidate = Join-Path (Get-Location) 'src-tauri/target/candidate-evidence'
+          node ../scripts/candidate-evidence.mjs --installer $installers[0].FullName --verification $verification --output $candidate
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate evidence packaging failed' }
+
+      - name: Save candidate evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: guijian-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: desktop/src-tauri/target/candidate-evidence/*
+          retention-days: 14
+          if-no-files-found: error
